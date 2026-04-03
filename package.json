@@ -1,0 +1,13 @@
+{
+  "name": "session-hub-scanner-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0",
+    "ws": "^8.18.2"
+  }
+}
