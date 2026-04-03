@@ -95,14 +95,15 @@ function main() {
 
   addPowerShellArg(installArgs, 'HostId', args['host-id'] || args.hostid || 'sucursal-1-caja-1');
   addPowerShellArg(installArgs, 'DisplayName', args['display-name'] || args.displayname || 'Scanner Caja 1');
-  addPowerShellArg(installArgs, 'BaseUrl', args['base-url'] || args.baseurl || 'https://devapp.dimensioncomercial.com.ar');
+  addPowerShellArg(installArgs, 'BaseUrl', args['base-url'] || args.baseurl || 'https://app.dimensioncomercial.com.ar');
   addPowerShellArg(installArgs, 'SerialPort', args['serial-port'] || args.serialport || 'COM6');
   addPowerShellArg(installArgs, 'ReaderDeviceId', args['reader-device-id'] || args.readerdeviceid || '');
+  addPowerShellArg(installArgs, 'RoutingMode', args['routing-mode'] || args.routingmode || 'backend');
   addPowerShellArg(installArgs, 'TaskName', args['task-name'] || args.taskname || 'SessionHubScannerBridge');
   addPowerShellArg(installArgs, 'TrayTaskName', args['tray-task-name'] || args.traytaskname || 'SessionHubScannerBridgeTray');
   addPowerShellArg(installArgs, 'UpdaterTaskName', args['updater-task-name'] || args.updatertaskname || 'SessionHubScannerBridgeUpdater');
   addPowerShellArg(installArgs, 'InstallRoot', args['install-root'] || args.installroot || `${process.env.ProgramData}\\SessionHubScannerBridge`);
-  addPowerShellArg(installArgs, 'UpdateManifestUrl', args['manifest-url'] || args.manifesturl || args['update-manifest-url'] || args.updatemanifesturl || '');
+  addPowerShellArg(installArgs, 'UpdateManifestUrl', args['manifest-url'] || args.manifesturl || args['update-manifest-url'] || args.updatemanifesturl || 'https://app.dimensioncomercial.com.ar/api/session-hub/scanner-host/manifest.json');
   addPowerShellArg(installArgs, 'UpdateChannel', args['update-channel'] || args.updatechannel || 'stable');
   addPowerShellArg(installArgs, 'UpdateIntervalMinutes', args['update-interval-minutes'] || args.updateintervalminutes || '240');
 

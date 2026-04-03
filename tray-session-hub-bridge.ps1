@@ -40,6 +40,7 @@ try {
 $root = (Resolve-Path $Root).Path
 $bridgeLog = Join-Path $root 'bridge.log'
 $runnerScript = Join-Path $root 'run-session-hub-bridge.ps1'
+$bridgeConfigPath = Join-Path $root 'scanner-bridge-config.json'
 $outErr = Join-Path $root 'tray.log'
 
 $state = [ordered]@{
@@ -59,6 +60,8 @@ $state = [ordered]@{
   LastScanStatus = 'idle'
   LastError = ''
   RecentScan = $false
+  RoutingMode = 'backend'
+  BindingActive = $false
 }
 
 $script:BridgeLogSignature = ''
@@ -265,6 +268,9 @@ function Update-ConnectionStateFromLog {
           if ($task.status -eq 'starting' -and $task.serial_port) {
             $state.LastSerialPort = [string]$task.serial_port
           }
+          if ($task.routing_mode) {
+            $state.RoutingMode = [string]$task.routing_mode
+          }
           if ($task.status -eq 'serial.port.open' -and $task.port) {
             $state.LastSerialPort = [string]$task.port
           }
@@ -288,9 +294,18 @@ function Update-ConnectionStateFromLog {
           }
           if ($task.status -eq 'binding.bound') {
             $state.LastScanStatus = 'bound'
+            $state.BindingActive = $true
           }
           if ($task.status -eq 'binding.released') {
             $state.LastScanStatus = 'released'
+            $state.BindingActive = $false
+          }
+          if (($task.status -eq 'binding.updated' -or $task.status -eq 'scanner.registered') -and $task.binding_status) {
+            if ($task.binding_status.owner_mobile_session_id) {
+              $state.BindingActive = $true
+            } elseif ($task.binding_status.owner_mobile_session_id -eq $null) {
+              $state.BindingActive = $false
+            }
           }
           if ($task.status -eq 'serial.port.failed' -and $task.message) {
             $state.LastError = [string]$task.message
@@ -369,7 +384,72 @@ function Build-StatusText {
   if ($state.LastScan) {
     $scanInfo = " | ULT: $($state.LastScanType) $($state.LastScan)"
   }
-  return "Host: $HostId | Tarea: $($state.BridgeTaskName) | $conn$scanInfo"
+  return "Host: $HostId | $conn | Modo: $($state.RoutingMode)$scanInfo"
+}
+
+function Read-BridgeConfig {
+  if (-not (Test-Path $bridgeConfigPath)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -Path $bridgeConfigPath -Raw | ConvertFrom-Json
+  } catch {
+    Log-Text "No se pudo leer config: $($_.Exception.Message)"
+    return $null
+  }
+}
+
+function Write-BridgeConfig {
+  param([Parameter(Mandatory = $true)]$Config)
+
+  $json = $Config | ConvertTo-Json -Depth 6
+  Set-Content -Path $bridgeConfigPath -Value $json -Encoding UTF8
+}
+
+function Set-ConfigPropertyValue {
+  param(
+    [Parameter(Mandatory = $true)]$Config,
+    [Parameter(Mandatory = $true)][string]$Name,
+    $Value
+  )
+
+  if ($Config.PSObject.Properties.Name -contains $Name) {
+    $Config.$Name = $Value
+    return
+  }
+
+  $Config | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+}
+
+function Set-BridgeRoutingMode {
+  param([Parameter(Mandatory = $true)][string]$RoutingMode)
+
+  Update-ConnectionStateFromLog
+  if ($RoutingMode -eq 'local_keyboard' -and $state.BindingActive) {
+    [System.Windows.Forms.MessageBox]::Show('No se permite pasar a local_keyboard mientras haya binding activo.', 'SessionHub Scanner Bridge', 'OK', 'Warning') | Out-Null
+    return
+  }
+
+  $config = Read-BridgeConfig
+  if (-not $config) {
+    [System.Windows.Forms.MessageBox]::Show("No existe config válida en:`n$bridgeConfigPath", 'SessionHub Scanner Bridge', 'OK', 'Warning') | Out-Null
+    return
+  }
+
+  Set-ConfigPropertyValue -Config $config -Name 'routing_mode' -Value $RoutingMode
+  Set-ConfigPropertyValue -Config $config -Name 'updated_at' -Value (Get-Date).ToString('o')
+  Write-BridgeConfig -Config $config
+  $state.RoutingMode = $RoutingMode
+
+  Invoke-RunnerAsync -Mode stop-task -TaskArg $BridgeTaskName
+  Start-Sleep -Milliseconds 900
+  Invoke-RunnerAsync -Mode start-task -TaskArg $BridgeTaskName
+}
+
+$initialConfig = Read-BridgeConfig
+if ($initialConfig -and $initialConfig.routing_mode) {
+  $state.RoutingMode = [string]$initialConfig.routing_mode
 }
 
 function New-QrTrayIcon {
@@ -462,6 +542,11 @@ function Set-NotifyTooltipText {
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 
 $menuStatus = New-Object System.Windows.Forms.ToolStripMenuItem 'Ver estado'
+$menuRoutingHeader = New-Object System.Windows.Forms.ToolStripMenuItem 'Modo de ruteo'
+$menuModeBackend = New-Object System.Windows.Forms.ToolStripMenuItem 'Backend'
+$menuModeLocal = New-Object System.Windows.Forms.ToolStripMenuItem 'Local keyboard'
+$menuModeHybrid = New-Object System.Windows.Forms.ToolStripMenuItem 'Hybrid'
+$menuSeparatorRouting = New-Object System.Windows.Forms.ToolStripSeparator
 $menuRestart = New-Object System.Windows.Forms.ToolStripMenuItem 'Reiniciar puente'
 $menuStop = New-Object System.Windows.Forms.ToolStripMenuItem 'Detener puente'
 $menuStart = New-Object System.Windows.Forms.ToolStripMenuItem 'Iniciar puente'
@@ -472,6 +557,15 @@ $menuExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Salir'
 $menuStatus.Add_Click({
   Update-ConnectionStateFromLog
   [System.Windows.Forms.MessageBox]::Show((Get-StatusMessage), 'SessionHub Scanner Bridge', 'OK', 'Information') | Out-Null
+})
+$menuModeBackend.Add_Click({
+  Set-BridgeRoutingMode -RoutingMode 'backend'
+})
+$menuModeLocal.Add_Click({
+  Set-BridgeRoutingMode -RoutingMode 'local_keyboard'
+})
+$menuModeHybrid.Add_Click({
+  Set-BridgeRoutingMode -RoutingMode 'hybrid'
 })
 $menuRestart.Add_Click({
   Invoke-RunnerAsync -Mode stop-task -TaskArg $BridgeTaskName
@@ -509,7 +603,8 @@ $menuExit.Add_Click({
   [System.Windows.Forms.Application]::Exit()
 })
 
-$menu.Items.AddRange(@($menuStatus, $menuRestart, $menuStop, $menuStart, $menuLogs, $menuToggleCapture, $menuExit))
+$menuRoutingHeader.DropDownItems.AddRange(@($menuModeBackend, $menuModeLocal, $menuModeHybrid))
+$menu.Items.AddRange(@($menuStatus, $menuRoutingHeader, $menuSeparatorRouting, $menuRestart, $menuStop, $menuStart, $menuLogs, $menuToggleCapture, $menuExit))
 $notify.ContextMenuStrip = $menu
 
 $form = New-Object System.Windows.Forms.Form
@@ -535,6 +630,8 @@ Task: $($state.BridgeTaskName)
 TaskState: $($taskState.task)
 Running: $($taskState.running_count)
 Conexión: $([bool]$state.Connected)
+RoutingMode: $($state.RoutingMode)
+BindingActive: $([bool]$state.BindingActive)
 Puerto: $($state.LastSerialPort)
 Scanner: $($state.LastDevice)
 Último scan: $($state.LastScan)
@@ -542,6 +639,12 @@ Tipo: $($state.LastScanType)
 Ack: $($state.LastAck)
 Estado: $($state.LastScanStatus)$errorLine
 "@
+}
+
+function Update-RoutingMenuChecks {
+  $menuModeBackend.Checked = $state.RoutingMode -eq 'backend'
+  $menuModeLocal.Checked = $state.RoutingMode -eq 'local_keyboard'
+  $menuModeHybrid.Checked = $state.RoutingMode -eq 'hybrid'
 }
 
 $timer.Add_Tick({
@@ -561,6 +664,7 @@ $timer.Add_Tick({
     }
 
     Set-NotifyTooltipText (Build-StatusText)
+    Update-RoutingMenuChecks
     if ($state.LastError) {
       $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
       $notify.BalloonTipText = $state.LastError
@@ -579,6 +683,7 @@ try {
   $timer.Start()
   Update-ConnectionStateFromLog -ForceTaskState
   $notify.Icon = $iconDisconnected
+  Update-RoutingMenuChecks
   Set-NotifyTooltipText (Build-StatusText)
   Log-Text 'Tray message loop starting.'
 
@@ -594,6 +699,3 @@ try {
   $iconScan.Dispose()
   $iconError.Dispose()
 }
-
-
-

@@ -2,7 +2,7 @@
   [Parameter(Position = 0)]
   [string]$HostId,
   [string]$DisplayName = 'Scanner Caja 1',
-  [string]$BaseUrl = 'https://devapp.dimensioncomercial.com.ar',
+  [string]$BaseUrl = 'https://app.dimensioncomercial.com.ar',
   [string]$SerialPort = 'COM6',
   [string]$ReaderDeviceId = '',
   [string]$InstallRoot = "$env:ProgramData\SessionHubScannerBridge",
@@ -12,7 +12,8 @@
   [int]$HeartbeatMs = 10000,
   [int]$SerialBaudRate = 9600,
   [int]$SerialWaitMs = 2000,
-  [string]$UpdateManifestUrl = '',
+  [string]$RoutingMode = 'backend',
+  [string]$UpdateManifestUrl = 'https://app.dimensioncomercial.com.ar/api/session-hub/scanner-host/manifest.json',
   [string]$UpdateChannel = 'stable',
   [int]$UpdateIntervalMinutes = 240,
   [string]$StartTask = 'true',
@@ -92,6 +93,7 @@ function Read-InstallerConfig {
     [int]$HeartbeatMsValue,
     [int]$SerialBaudRateValue,
     [int]$SerialWaitMsValue,
+    [string]$RoutingModeValue,
     [string]$UpdateManifestUrlValue,
     [string]$UpdateChannelValue,
     [int]$UpdateIntervalMinutesValue,
@@ -115,6 +117,7 @@ function Read-InstallerConfig {
   $boundHeartbeatMs = if ($HeartbeatMsValue) { $HeartbeatMsValue } else { $null }
   $boundSerialBaudRate = if ($SerialBaudRateValue) { $SerialBaudRateValue } else { $null }
   $boundSerialWaitMs = if ($SerialWaitMsValue) { $SerialWaitMsValue } else { $null }
+  $boundRoutingMode = if ($RoutingModeValue) { $RoutingModeValue } else { $null }
   $boundUpdateManifestUrl = if ($UpdateManifestUrlValue) { $UpdateManifestUrlValue } else { $null }
   $boundUpdateChannel = if ($UpdateChannelValue) { $UpdateChannelValue } else { $null }
   $boundUpdateIntervalMinutes = if ($UpdateIntervalMinutesValue) { $UpdateIntervalMinutesValue } else { $null }
@@ -127,7 +130,7 @@ function Read-InstallerConfig {
   $cfg = @{
     HostId = if ($boundHostId) { $boundHostId } else { $parsed['hostid'] }
     DisplayName = if ($boundDisplayName) { $boundDisplayName } else { if ($parsed.ContainsKey('displayname')) { $parsed['displayname'] } else { 'Scanner Caja 1' } }
-    BaseUrl = if ($boundBaseUrl) { $boundBaseUrl } else { if ($parsed.ContainsKey('baseurl')) { $parsed['baseurl'] } else { 'https://devapp.dimensioncomercial.com.ar' } }
+    BaseUrl = if ($boundBaseUrl) { $boundBaseUrl } else { if ($parsed.ContainsKey('baseurl')) { $parsed['baseurl'] } else { 'https://app.dimensioncomercial.com.ar' } }
     SerialPort = if ($boundSerialPort) { $boundSerialPort } else { if ($parsed.ContainsKey('serialport')) { $parsed['serialport'] } else { 'COM6' } }
     ReaderDeviceId = if ($boundReaderDeviceId) { $boundReaderDeviceId } else { if ($parsed.ContainsKey('readersdeviceid')) { $parsed['readersdeviceid'] } else { if ($parsed.ContainsKey('readerdeviceid')) { $parsed['readerdeviceid'] } else { '' } } }
     InstallRoot = if ($boundInstallRoot) { $boundInstallRoot } else { if ($parsed.ContainsKey('installroot')) { $parsed['installroot'] } else { "$env:ProgramData\SessionHubScannerBridge" } }
@@ -137,7 +140,8 @@ function Read-InstallerConfig {
     HeartbeatMs = if ($boundHeartbeatMs) { [int]$boundHeartbeatMs } else { if ($parsed.ContainsKey('heartbeatms')) { [int]$parsed['heartbeatms'] } else { 10000 } }
     SerialBaudRate = if ($boundSerialBaudRate) { [int]$boundSerialBaudRate } else { if ($parsed.ContainsKey('serialbaudrate')) { [int]$parsed['serialbaudrate'] } else { 9600 } }
     SerialWaitMs = if ($boundSerialWaitMs) { [int]$boundSerialWaitMs } else { if ($parsed.ContainsKey('serialwaitms')) { [int]$parsed['serialwaitms'] } else { 2000 } }
-    UpdateManifestUrl = if ($boundUpdateManifestUrl) { $boundUpdateManifestUrl } else { if ($parsed.ContainsKey('updatemanifesturl')) { $parsed['updatemanifesturl'] } else { '' } }
+    RoutingMode = if ($boundRoutingMode) { $boundRoutingMode } else { if ($parsed.ContainsKey('routingmode')) { $parsed['routingmode'] } else { 'backend' } }
+    UpdateManifestUrl = if ($boundUpdateManifestUrl) { $boundUpdateManifestUrl } else { if ($parsed.ContainsKey('updatemanifesturl')) { $parsed['updatemanifesturl'] } else { 'https://app.dimensioncomercial.com.ar/api/session-hub/scanner-host/manifest.json' } }
     UpdateChannel = if ($boundUpdateChannel) { $boundUpdateChannel } else { if ($parsed.ContainsKey('updatechannel')) { $parsed['updatechannel'] } else { 'stable' } }
     UpdateIntervalMinutes = if ($boundUpdateIntervalMinutes) { [int]$boundUpdateIntervalMinutes } else { if ($parsed.ContainsKey('updateintervalminutes')) { [int]$parsed['updateintervalminutes'] } else { 240 } }
     StartTask = if ($boundStartTask) { $boundStartTask } else { if ($parsed.ContainsKey('starttask')) { $parsed['starttask'] } else { 'true' } }
@@ -209,9 +213,11 @@ function Write-BridgeConfig {
     reader_device_id = $Cfg.ReaderDeviceId
     install_root = $InstallPath
     input_mode = 'serial'
+    routing_mode = $Cfg.RoutingMode
     heartbeat_ms = $Cfg.HeartbeatMs
     serial_baud_rate = $Cfg.SerialBaudRate
     serial_wait_ms = $Cfg.SerialWaitMs
+    local_keyboard_append_enter = $true
     task_name = $Cfg.TaskName
     tray_task_name = $Cfg.TrayTaskName
     updater_task_name = $Cfg.UpdaterTaskName
@@ -304,6 +310,7 @@ $config = Read-InstallerConfig -InputArgs $args `
   -HeartbeatMsValue $HeartbeatMs `
   -SerialBaudRateValue $SerialBaudRate `
   -SerialWaitMsValue $SerialWaitMs `
+  -RoutingModeValue $RoutingMode `
   -UpdateManifestUrlValue $UpdateManifestUrl `
   -UpdateChannelValue $UpdateChannel `
   -UpdateIntervalMinutesValue $UpdateIntervalMinutes `
@@ -380,6 +387,7 @@ $cfgTask = @{
   SerialPort = $config.SerialPort
   ReaderDeviceId = $config.ReaderDeviceId
   InputMode = 'serial'
+  RoutingMode = $config.RoutingMode
   HeartbeatMs = $config.HeartbeatMs
   SerialBaudRate = $config.SerialBaudRate
   SerialWaitMs = $config.SerialWaitMs
@@ -474,5 +482,5 @@ Write-Host "TrayTask: $($config.TrayTaskName)"
 Write-Host "UpdaterTask: $($config.UpdaterTaskName)"
 Write-Host "Version: $packageVersion"
 Write-Host "UpdateManifestUrl: $($config.UpdateManifestUrl)"
+Write-Host "RoutingMode: $($config.RoutingMode)"
 Write-Host "HostId: $($config.HostId) | Puerto: $($config.SerialPort) | ReaderDeviceId: $($config.ReaderDeviceId)"
-

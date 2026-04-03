@@ -7,7 +7,7 @@ param(
   [string]$Root = 'C:\gestor_produccion\backend\tools\session-hub-scanner-bridge',
   [string]$HostId = 'sucursal-1-caja-1',
   [string]$DisplayName = 'Scanner Caja 1',
-  [string]$BaseUrl = 'https://devapp.dimensioncomercial.com.ar',
+  [string]$BaseUrl = 'https://app.dimensioncomercial.com.ar',
   [string]$SerialPort = 'COM6',
   [string]$ReaderDeviceId = '',
   [string]$InputMode = 'serial',
@@ -28,6 +28,7 @@ $bundledNode = Join-Path $root 'node.exe'
 $bridgeExe = Join-Path $root 'session-hub-scanner-bridge.exe'
 $runnerLog = Join-Path $root 'runner.log'
 $trayScript = Join-Path $root 'tray-session-hub-bridge.ps1'
+$bridgeConfigPath = Join-Path $root 'scanner-bridge-config.json'
 
 function Trace-Runner {
   param([string]$Message)
@@ -240,6 +241,7 @@ function Set-BridgeEnv {
   $env:SESSION_HUB_SCANNER_SERIAL_FALLBACK_TO_STDIN = '0'
   $env:SESSION_HUB_SCANNER_SERIAL_INTERACTIVE = '0'
   $env:SESSION_HUB_SCANNER_HEARTBEAT_MS = [string]$HeartbeatMs
+  $env:SESSION_HUB_SCANNER_CONFIG_PATH = $bridgeConfigPath
 }
 
 function Get-RunningBridgeProcesses {
@@ -253,6 +255,7 @@ function Resolve-BridgeLaunchCommand {
       '--base-url', $BaseUrl,
       '--host-id', $HostId,
       '--display-name', $DisplayName,
+      '--config-path', $bridgeConfigPath,
       '--input-mode', $InputMode,
       '--serial-port', $SerialPort,
       '--heartbeat-ms', $HeartbeatMs,
@@ -286,6 +289,7 @@ function Resolve-BridgeLaunchCommand {
     '--base-url', $BaseUrl,
     '--host-id', $HostId,
     '--display-name', $DisplayName,
+    '--config-path', $bridgeConfigPath,
     '--input-mode', $InputMode,
     '--serial-port', $SerialPort,
     '--heartbeat-ms', $HeartbeatMs,
@@ -612,6 +616,20 @@ function Show-TaskStatus {
   Write-Host ("State: {0}" -f $taskState)
   Write-Host ("LastRunTime: {0}" -f $state.LastRunTime)
   Write-Host ("LastTaskResult: {0}" -f $state.LastTaskResult)
+  Write-Host ("ConfigPath: {0}" -f $bridgeConfigPath)
+  if (Test-Path $bridgeConfigPath) {
+    try {
+      $cfg = Get-Content -Path $bridgeConfigPath -Raw | ConvertFrom-Json
+      if ($cfg.routing_mode) {
+        Write-Host ("RoutingMode: {0}" -f $cfg.routing_mode)
+      }
+      if ($cfg.base_url) {
+        Write-Host ("BaseUrl: {0}" -f $cfg.base_url)
+      }
+    } catch {
+      Write-Host ("RoutingMode: <config parse error>")
+    }
+  }
 
   $running = @(Get-RunningBridgeProcesses)
   if ($running.Count -gt 0) {
