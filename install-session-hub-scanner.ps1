@@ -409,9 +409,9 @@ Write-BridgeConfig -Cfg $config -InstallPath $config.InstallRoot -Version $packa
 Invoke-Runner -Mode 'install-task' -RunnerPath $runner -Cfg $cfgTask
 if ((Normalize-Boolean -Value $config.InstallTray)) {
   try {
-    Invoke-Runner -Mode 'uninstall-tray-task' -RunnerPath $runner -Cfg $cfgTask
+    Invoke-Runner -Mode 'install-tray-task' -RunnerPath $runner -Cfg $cfgTask
   } catch {
-    # ignore if tray task does not exist
+    Write-Host "No se pudo registrar la task de tray: $($_.Exception.Message)"
   }
   $startupLauncher = Install-TrayStartupLauncher -Cfg $cfgTask
   if ($startupLauncher) {
@@ -426,9 +426,22 @@ if ($startTaskEnabled) {
 }
 
 if ((Normalize-Boolean -Value $config.InstallTray) -and (Normalize-Boolean -Value $config.StartTrayTask) -and $startupLauncher) {
-  & wscript.exe $startupLauncher
+  try {
+    Invoke-Runner -Mode 'start-tray-task' -RunnerPath $runner -Cfg @{ TrayTaskName = $config.TrayTaskName; HostId = $config.HostId; Root = $config.InstallRoot }
+  } catch {
+    Write-Host "No se pudo iniciar la task de tray: $($_.Exception.Message)"
+  }
+
   Start-Sleep -Seconds 2
-  Invoke-Runner -Mode 'status-tray-task' -RunnerPath $runner -Cfg @{ TrayTaskName = $config.TrayTaskName; HostId = $config.HostId; Root = $config.InstallRoot }
+  try {
+    Invoke-Runner -Mode 'status-tray-task' -RunnerPath $runner -Cfg @{ TrayTaskName = $config.TrayTaskName; HostId = $config.HostId; Root = $config.InstallRoot }
+  } catch {
+    Write-Host "No se pudo consultar el estado de la tray task: $($_.Exception.Message)"
+  }
+
+  if ($startupLauncher) {
+    & wscript.exe $startupLauncher
+  }
 }
 
 $updaterScript = Join-Path $config.InstallRoot 'update-session-hub-scanner.ps1'
