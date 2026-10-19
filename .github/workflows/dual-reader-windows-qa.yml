@@ -22,12 +22,34 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        # Keep worktree bytes equal to the reviewed Git blobs on Windows.
+        # This overrides runner-global autocrlf only for this checkout action.
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
         with:
           node-version: 22
           cache: npm
+      - name: Verify checkout preserves reviewed Source bytes
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const paths = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean);
+          for (const file of paths) {
+            const canonical = execFileSync('git', ['cat-file', 'blob', 'HEAD:' + file]);
+            if (!fs.readFileSync(file).equals(canonical)) throw new Error('CHECKOUT_BYTES_DIFFER: ' + file);
+          }
+          console.log('Reviewed Git blob bytes preserved for ' + paths.length + ' files');
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install locked Node dependencies
         run: npm ci
       - name: Full Node suites including actual Windows RSA with disposable CI key
