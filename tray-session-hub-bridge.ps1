@@ -41,6 +41,8 @@ $root = (Resolve-Path $Root).Path
 $bridgeLog = Join-Path $root 'bridge.log'
 $runnerScript = Join-Path $root 'run-session-hub-bridge.ps1'
 $outErr = Join-Path $root 'tray.log'
+$updateStatusPath = Join-Path $root 'update-status.json'
+$script:UpdateAlertShown = ''
 
 $state = [ordered]@{
   BridgeTaskName = $BridgeTaskName
@@ -390,8 +392,31 @@ function Update-ConnectionStateFromLog {
   }
 }
 
+# OTA: secret-free status written by the updater. Deferred installs/rollbacks
+# and the deferral alert are shown; nothing here changes the bridge.
+function Get-UpdateStatusLine {
+  if (-not (Test-Path -LiteralPath $updateStatusPath)) { return '' }
+  try {
+    $status = [System.IO.File]::ReadAllText($updateStatusPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+  } catch {
+    return ''
+  }
+  $phase = [string]$status.phase
+  if (@('install_deferred', 'rollback_deferred', 'install_blocked') -notcontains $phase) { return '' }
+  $label = if ($phase -eq 'rollback_deferred') { 'Reversion pendiente' } elseif ($phase -eq 'install_blocked') { 'Actualizacion bloqueada por diagnostico' } else { 'Actualizacion pendiente' }
+  $line = "$label $($status.target_version) (esperando cola; intentos=$($status.defer_count))"
+  if ([bool]$status.alert) { $line = "ALERTA: $line" }
+  return $line
+}
+
 function Build-StatusText {
   $conn = if ($state.Connected) { 'Conectado' } else { 'Desconectado' }
+  # The tooltip is cut at 63 chars: a pending update goes first, short form.
+  $updateLine = Get-UpdateStatusLine
+  if ($updateLine) {
+    $short = if ($updateLine.StartsWith('ALERTA')) { 'ALERTA upd' } else { 'Upd pendiente' }
+    return "$short | $conn | Host: $HostId"
+  }
   $scanInfo = ''
   if ($state.LastScan) {
     $scanInfo = " | ULT: $($state.LastScanType) $($state.LastScan)"
@@ -572,6 +597,7 @@ Binding: $($state.BindingStatus) | Target: $($state.BindingTarget) | Owner: $($s
 Tipo: $($state.LastScanType)
 Ack: $($state.LastAck)
 Estado: $($state.LastScanStatus)$errorLine
+Actualizacion: $(Get-UpdateStatusLine)
 "@
 }
 
@@ -592,6 +618,14 @@ $timer.Add_Tick({
     }
 
     Set-NotifyTooltipText (Build-StatusText)
+    $updateLine = Get-UpdateStatusLine
+    if ($updateLine -and $updateLine.StartsWith('ALERTA') -and $script:UpdateAlertShown -ne $updateLine) {
+      $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
+      $notify.BalloonTipText = $updateLine
+      $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Warning
+      $notify.ShowBalloonTip(4000)
+      $script:UpdateAlertShown = $updateLine
+    }
     if ($state.LastError) {
       $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
       $notify.BalloonTipText = $state.LastError

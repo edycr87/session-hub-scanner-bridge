@@ -2,6 +2,7 @@ const WebSocket = require("ws");
 const readline = require("readline");
 const crypto = require("crypto");
 const path = require("path");
+const fs = require("fs");
 
 function log(label, payload) {
   console.log(
@@ -282,6 +283,21 @@ const cfg = {
     false,
   ),
   readersConfigured: Boolean(readersRaw),
+  stateFile: first(
+    raw["state-file"],
+    process.env.SESSION_HUB_SCANNER_STATE_FILE,
+  ),
+  drainFile: first(
+    raw["drain-file"],
+    process.env.SESSION_HUB_SCANNER_DRAIN_FILE,
+  ),
+  drainQuietMs: posInt(
+    first(
+      raw["drain-quiet-ms"],
+      process.env.SESSION_HUB_SCANNER_DRAIN_QUIET_MS,
+    ),
+    3000,
+  ),
 };
 if (!cfg.baseUrl || !cfg.hostId)
   throw new Error("base-url and host-id are required");
@@ -308,8 +324,35 @@ let stopped = false;
 let reconnectAttempts = 0;
 let inFlight = null;
 let stdinCapture = null;
+let stdinPartial = "";
 let bindingStatus = null;
 const queue = [];
+// OTA support (opt-in): a local state file the updater reads to decide whether
+// the host is idle, and a drain request file the updater writes to ask the
+// bridge to exit by itself once no scan or ACK is pending. Nothing here is
+// persisted across restarts: the queue stays in memory, so the updater must
+// wait for it to be empty instead of killing the process.
+function readBridgeVersion() {
+  try {
+    const value = fs
+      .readFileSync(path.join(__dirname, "package-version.txt"), "utf8")
+      .replace(/^\uFEFF/, "")
+      .trim();
+    if (value) return value;
+  } catch (_) {}
+  try {
+    return String(require("./package.json").version || "0.0.0");
+  } catch (_) {
+    return "0.0.0";
+  }
+}
+const bridgeVersion = readBridgeVersion();
+const startedAtMs = Date.now();
+let registeredOnce = false;
+let lastCaptureMs = null;
+let drainState = { requested: false, nonce: null, since: null };
+let exiting = false;
+let stateQueued = false;
 const scannerState = {
   status: "ready",
   owner_mobile_session_id: null,
@@ -317,6 +360,99 @@ const scannerState = {
 };
 function scannerStateSnapshot() {
   return { ...scannerState };
+}
+function partialInput() {
+  return Boolean(stdinPartial) || Array.from(readers.values()).some((reader) => Boolean(reader.buffer));
+}
+function pendingTotal() {
+  return queue.length + (inFlight ? 1 : 0);
+}
+function writeState(extra) {
+  if (!cfg.stateFile) return;
+  const snapshot = {
+    schema: "session-hub-scanner-bridge-state/v1",
+    pid: process.pid,
+    version: bridgeVersion,
+    host_id: cfg.hostId,
+    started_at: new Date(startedAtMs).toISOString(),
+    updated_at: new Date().toISOString(),
+    ws_ready: ready,
+    registered_once: registeredOnce,
+    queue_length: queue.length,
+    in_flight: Boolean(inFlight),
+    pending_total: pendingTotal(),
+    partial_input: partialInput(),
+    last_capture_at: lastCaptureMs ? new Date(lastCaptureMs).toISOString() : null,
+    readers: states(),
+    drain: {
+      requested: drainState.requested,
+      nonce: drainState.nonce,
+      since: drainState.since ? new Date(drainState.since).toISOString() : null,
+    },
+    drained: false,
+    ...(extra || {}),
+  };
+  const tmp = cfg.stateFile + ".tmp-" + process.pid;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(snapshot));
+    fs.renameSync(tmp, cfg.stateFile);
+  } catch (error) {
+    log("bridge.error", { status: "state.write.failed", message: error.message });
+  }
+}
+function markState() {
+  if (!cfg.stateFile || stateQueued || exiting) return;
+  stateQueued = true;
+  setImmediate(() => {
+    stateQueued = false;
+    if (!exiting) writeState();
+  });
+}
+function readDrainRequest() {
+  try {
+    const text = fs
+      .readFileSync(cfg.drainFile, "utf8")
+      .replace(/^\uFEFF/, "")
+      .trim();
+    const parsed = JSON.parse(text);
+    const requestedAt = Date.parse((parsed && parsed.requested_at) || "");
+    // A request written before this process started is stale (for example a
+    // power cut during a previous drain): it must never stop a fresh bridge.
+    if (Number.isFinite(requestedAt) && requestedAt < startedAtMs) return null;
+    return { nonce: String((parsed && parsed.nonce) || "") || "unnamed" };
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    // Present but unreadable/partial: treat as a request; it can only delay.
+    return { nonce: "unreadable" };
+  }
+}
+function checkDrain() {
+  if (!cfg.drainFile || exiting) return;
+  const request = readDrainRequest();
+  if (!request) {
+    if (drainState.requested) {
+      log("bridge.status", { status: "drain.cancelled", nonce: drainState.nonce });
+      drainState = { requested: false, nonce: null, since: null };
+      markState();
+    }
+    return;
+  }
+  if (!drainState.requested || drainState.nonce !== request.nonce) {
+    drainState = { requested: true, nonce: request.nonce, since: Date.now() };
+    log("bridge.status", { status: "drain.requested", nonce: request.nonce });
+    markState();
+  }
+  const quietSince = lastCaptureMs || startedAtMs;
+  const idle =
+    pendingTotal() === 0 &&
+    !partialInput() &&
+    Date.now() - quietSince >= cfg.drainQuietMs;
+  if (!idle) return;
+  exiting = true;
+  writeState({ drained: true, drain_nonce: drainState.nonce, exit_reason: "drain" });
+  log("bridge.status", { status: "drain.completed", nonce: drainState.nonce });
+  stop();
+  setTimeout(() => process.exit(0), 50);
 }
 function readBinding(payload) {
   return (
@@ -413,6 +549,7 @@ function retry(scan, reason, delay = 1000) {
   if (inFlight && inFlight.scan_id === scan.scan_id) inFlight = null;
   scan.notBefore = Date.now() + delay;
   if (!queue.some((item) => item.scan_id === scan.scan_id)) queue.unshift(scan);
+  markState();
   log("bridge.status", {
     status: "scan.retry.scheduled",
     scan_id: scan.scan_id,
@@ -425,6 +562,7 @@ function retry(scan, reason, delay = 1000) {
 function fail(scan, reason) {
   clearAck(scan);
   if (inFlight && inFlight.scan_id === scan.scan_id) inFlight = null;
+  markState();
   log("bridge.error", {
     status: "scanner.scan.failed",
     scan_id: scan.scan_id,
@@ -461,6 +599,7 @@ function flush() {
   if (!send("scanner.scan", payload)) return retry(scan, "socket_not_ready");
   scan.attempts += 1;
   inFlight = scan;
+  markState();
   log("bridge.scan", {
     status: "scan.outbound",
     ...payload,
@@ -496,6 +635,8 @@ function capture(reader, rawValue, source) {
     attempts: 0,
   };
   queue.push(scan);
+  lastCaptureMs = Date.now();
+  markState();
   log("bridge.status", {
     status: "scan.captured",
     scan_id: scan.scan_id,
@@ -527,6 +668,7 @@ function ack(payload) {
   if (payload.ok !== false) {
     clearAck(scan);
     inFlight = null;
+    markState();
     log("bridge.status", {
       status: "scanner.ack",
       ack_id: id,
@@ -622,6 +764,7 @@ async function startReader(reader) {
     reader.buffer = "";
     reader.state = "open";
     reader.attempts = 0;
+    markState();
     port.on("data", (chunk) => {
       reader.buffer += Buffer.isBuffer(chunk)
         ? chunk.toString("utf8")
@@ -652,6 +795,7 @@ async function startReader(reader) {
     port.on("close", () => {
       reader.port = null;
       reader.state = "disconnected";
+      markState();
       log("bridge.status", {
         status: "serial.reader.closed",
         reader_id: reader.reader_id,
@@ -668,6 +812,7 @@ async function startReader(reader) {
   } catch (error) {
     reader.state = "failed";
     reader.attempts += 1;
+    markState();
     log("bridge.error", {
       status: "serial.reader.failed",
       reader_id: reader.reader_id,
@@ -696,6 +841,13 @@ function startStdin(reason) {
   stdinCapture = readline.createInterface({
     input: process.stdin,
     terminal: false,
+  });
+  // Keyboard/HID stdin can also be mid-scan when an OTA drain arrives.
+  // Track the unfinished line without persisting its contents in the state file.
+  process.stdin.on("data", (chunk) => {
+    const text = stdinPartial + chunk.toString("utf8");
+    stdinPartial = text.split(/[\r\n]/).pop();
+    markState();
   });
   stdinCapture.on("line", (line) => {
     if (line === ":quit") stop();
@@ -752,6 +904,8 @@ function connect() {
     if (event === "scanner.registered") {
       applyBinding(readBinding(payload), event);
       ready = true;
+      registeredOnce = true;
+      markState();
       log("bridge.status", {
         status: "scanner.registered",
         readers: states(),
@@ -766,6 +920,7 @@ function connect() {
   });
   socket.on("close", () => {
     ready = false;
+    markState();
     if (inFlight) retry(inFlight, "socket_disconnected", 0);
     reconnect();
   });
@@ -810,6 +965,11 @@ setInterval(
     }),
   cfg.heartbeatMs,
 );
+if (cfg.stateFile || cfg.drainFile)
+  setInterval(() => {
+    checkDrain();
+    if (!exiting) writeState();
+  }, 1000);
 if (cfg.inputMode === "stdin") startStdin("configured stdin mode");
 else readers.forEach((reader) => startReader(reader));
 process.on("SIGINT", () => {

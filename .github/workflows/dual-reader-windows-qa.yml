@@ -9,6 +9,7 @@ on:
       - package.json
       - package-lock.json
       - test/**
+      - tools/**
       - .github/workflows/dual-reader-windows-qa.yml
   workflow_dispatch:
 
@@ -18,17 +19,41 @@ permissions:
 jobs:
   dual-reader-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        # Keep worktree bytes equal to the reviewed Git blobs on Windows.
+        # This overrides runner-global autocrlf only for this checkout action.
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
         with:
           node-version: 22
           cache: npm
+      - name: Verify checkout preserves reviewed Source bytes
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const paths = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean);
+          for (const file of paths) {
+            const canonical = execFileSync('git', ['cat-file', 'blob', 'HEAD:' + file]);
+            if (!fs.readFileSync(file).equals(canonical)) throw new Error('CHECKOUT_BYTES_DIFFER: ' + file);
+          }
+          console.log('Reviewed Git blob bytes preserved for ' + paths.length + ' files');
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install locked Node dependencies
         run: npm ci
-      - name: Run dual-reader integration checks
-        run: npm run test:dual-reader
+      - name: Full Node suites including actual Windows RSA with disposable CI key
+        run: npm test
       - name: Parse repository PowerShell with Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -51,3 +76,44 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
             if ($errors.Count) { $errors | ForEach-Object { Write-Error ('{0}: {1}' -f $relativePath, $_.Message) }; exit 1 }
           }
+      - name: Build strict 1.2.0 package and record immutable evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -ne '1.2.0') { throw 'VERSION_MISMATCH' }
+          $out = Join-Path $env:RUNNER_TEMP 'scanner-artifact'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $zip = Join-Path $out 'session-hub-scanner-bridge-1.2.0.zip'
+          ./build-session-hub-scanner-package.ps1 -SourceRoot $env:GITHUB_WORKSPACE -DestinationPath $zip -Version '1.2.0'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $forbidden = '(^|/)(scanner-bridge-config\.json|installed-version\.txt|bridge-state\.json|update-drain\.request|update-status\.json|update\.lock|\.ota|\.env(?:\.[^/]*)?|private\.pem|[^/]*\.(?:key|pfx|p12)|(?:bridge|runner|tray|update)\.(?:log|err))($|/)'
+            foreach ($entry in $archive.Entries) {
+              if (($entry.FullName -replace '\\', '/') -match $forbidden) { throw "Forbidden package entry: $($entry.FullName)" }
+            }
+          } finally { $archive.Dispose() }
+          $evidence = [ordered]@{
+            version = '1.2.0'
+            source_commit = (git rev-parse HEAD).Trim()
+            pull_request_head = '${{ github.event.pull_request.head.sha }}'
+            node_version = (node --version).Trim()
+            sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            size_bytes = (Get-Item -LiteralPath $zip).Length
+            run_id = '${{ github.run_id }}'
+          }
+          $evidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'build-evidence.json') -Encoding utf8
+          $evidence | ConvertTo-Json
+      - name: Upload Source-bound Windows package
+        id: package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 immutable ref
+        with:
+          name: scanner-1.2.0-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/scanner-artifact/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record uploaded artifact digest
+        shell: pwsh
+        run: |
+          'Artifact SHA256: ${{ steps.package.outputs.artifact-digest }}' >> $env:GITHUB_STEP_SUMMARY
+          'Artifact ID: ${{ steps.package.outputs.artifact-id }}' >> $env:GITHUB_STEP_SUMMARY

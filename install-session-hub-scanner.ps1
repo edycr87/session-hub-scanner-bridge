@@ -24,7 +24,8 @@
   [string]$InstallTray = 'true',
   [string]$StartTrayTask = 'true',
   [string]$InstallUpdater = 'true',
-  [string]$StartUpdaterTask = 'true'
+  [string]$StartUpdaterTask = 'true',
+  [string]$AcknowledgeDiagnosticDrop = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -210,6 +211,110 @@ function Get-BridgePackageVersion {
   return '0.0.0'
 }
 
+# A reinstall (for example the manual bootstrap to the first OTA-capable
+# version) must not wipe local identity, readers or secrets that were not passed
+# again. Empty values inherit the stored ones; a value passed explicitly wins.
+# Clearing a stored value requires editing scanner-bridge-config.json by hand.
+function Merge-PreservedConfig {
+  param(
+    [Parameter(Mandatory = $true)][hashtable]$Cfg,
+    [Parameter(Mandatory = $true)][string]$InstallPath
+  )
+
+  $configPath = Join-Path $InstallPath 'scanner-bridge-config.json'
+  if (-not (Test-Path -LiteralPath $configPath)) {
+    return
+  }
+  try {
+    $stored = [System.IO.File]::ReadAllText($configPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+  } catch {
+    throw "scanner-bridge-config.json existente no se pudo leer; no se sobrescribe. Revisar el archivo antes de reinstalar."
+  }
+  $map = [ordered]@{
+    ReadersJson = 'readers_json'
+    SharedSecret = 'shared_secret'
+    Symbology = 'symbology'
+    ReaderDeviceId = 'reader_device_id'
+    UpdateManifestUrl = 'update_manifest_url'
+  }
+  foreach ($key in $map.Keys) {
+    $storedValue = $stored.($map[$key])
+    if ([string]::IsNullOrWhiteSpace([string]$Cfg[$key]) -and -not [string]::IsNullOrWhiteSpace([string]$storedValue)) {
+      $Cfg[$key] = [string]$storedValue
+      Write-Host "Config preservada: $($map[$key])"
+    }
+  }
+  $script:PreservedOptionalConfig = @{}
+  foreach ($optional in @('update_window', 'update_quiet_seconds')) {
+    if ($null -ne $stored.$optional) {
+      $script:PreservedOptionalConfig[$optional] = $stored.$optional
+    }
+  }
+}
+
+function Get-PlannedReaders {
+  param([string]$ReadersJson)
+  if ([string]::IsNullOrWhiteSpace($ReadersJson)) { return $null }
+  $readers = @()
+  foreach ($item in @($ReadersJson | ConvertFrom-Json)) {
+    $readers += [ordered]@{
+      reader_id = if ($item.reader_id) { [string]$item.reader_id } else { [string]$item.readerId }
+      serial_port = if ($item.serial_port) { [string]$item.serial_port } else { [string]$item.serialPort }
+      scanner_device_id = if ($item.scanner_device_id) { [string]$item.scanner_device_id } elseif ($item.scannerDeviceId) { [string]$item.scannerDeviceId } else { [string]$item.device_id }
+      serial_baud_rate = if ($item.serial_baud_rate) { [string]$item.serial_baud_rate } else { [string]$item.serialBaudRate }
+    }
+  }
+  return ,$readers
+}
+
+function Invoke-InstallPreflight {
+  param([Parameter(Mandatory = $true)][hashtable]$Cfg)
+  $diagnostic = Join-Path $PSScriptRoot 'diagnose-session-hub-scanner.ps1'
+  if (-not (Test-Path -LiteralPath $diagnostic) -or -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'diagnose-session-hub-scanner.js'))) {
+    throw 'Falta el diagnostico de preinstalacion en el paquete; no se instala (falla cerrado).'
+  }
+  # Planned values only; the secret travels as presence, never as a value.
+  $planned = [ordered]@{
+    input_mode = 'serial'
+    install_root = $Cfg.InstallRoot
+    host_id = $Cfg.HostId
+    display_name = $Cfg.DisplayName
+    base_url = $Cfg.BaseUrl
+    serial_port = $Cfg.SerialPort
+    reader_device_id = $Cfg.ReaderDeviceId
+    symbology = $Cfg.Symbology
+    serial_fallback = $Cfg.SerialFallback
+    serial_interactive = $Cfg.SerialInteractive
+    heartbeat_ms = $Cfg.HeartbeatMs
+    serial_baud_rate = $Cfg.SerialBaudRate
+    serial_wait_ms = $Cfg.SerialWaitMs
+    task_name = $Cfg.TaskName
+    tray_task_name = $Cfg.TrayTaskName
+    updater_task_name = $Cfg.UpdaterTaskName
+    update_manifest_url = $Cfg.UpdateManifestUrl
+    update_channel = $Cfg.UpdateChannel
+    update_interval_minutes = $Cfg.UpdateIntervalMinutes
+    install_tray = (Normalize-Boolean -Value $Cfg.InstallTray)
+    install_updater = (Normalize-Boolean -Value $Cfg.InstallUpdater)
+    readers = (Get-PlannedReaders -ReadersJson $Cfg.ReadersJson)
+    shared_secret_present = -not [string]::IsNullOrWhiteSpace([string]$Cfg.SharedSecret)
+  }
+  $plannedPath = Join-Path ([System.IO.Path]::GetTempPath()) ('session-hub-planned-' + [guid]::NewGuid().ToString('N') + '.json')
+  $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) ('session-hub-preinstall-diagnostic-' + (Get-Date).ToString('yyyyMMddTHHmmss') + '.json')
+  [System.IO.File]::WriteAllText($plannedPath, ($planned | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+  try {
+    $acknowledge = $AcknowledgeDiagnosticDrop
+    & $diagnostic -Context install -TargetInstallRoot $Cfg.InstallRoot -PlannedPath $plannedPath -AcknowledgeDrop $acknowledge -OutputPath $reportPath
+    $code = $LASTEXITCODE
+  } finally {
+    Remove-Item -LiteralPath $plannedPath -Force -ErrorAction SilentlyContinue
+  }
+  if ($code -ne 0) {
+    throw "Diagnostico de preinstalacion: BLOQUEADO (codigo $code). No se toco nada. Informe sin secretos: $reportPath"
+  }
+  Write-Host "Diagnostico de preinstalacion: PASS. Informe: $reportPath"
+}
+
 function Write-BridgeConfig {
   param(
     [Parameter(Mandatory = $true)][hashtable]$Cfg,
@@ -245,6 +350,11 @@ function Write-BridgeConfig {
     update_interval_minutes = $Cfg.UpdateIntervalMinutes
     install_tray = (Normalize-Boolean -Value $Cfg.InstallTray)
     install_updater = (Normalize-Boolean -Value $Cfg.InstallUpdater)
+  }
+  if ($script:PreservedOptionalConfig) {
+    foreach ($optional in $script:PreservedOptionalConfig.Keys) {
+      $payload[$optional] = $script:PreservedOptionalConfig[$optional]
+    }
   }
 
   $json = $payload | ConvertTo-Json -Depth 5
@@ -349,6 +459,12 @@ if (-not (Test-Path $runner)) {
   throw "No se encuentra run-session-hub-bridge.ps1 en $PSScriptRoot"
 }
 
+# Read-only preflight BEFORE stopping or touching anything: what is installed
+# today (version, hashes, readers, manifest URL, tasks) is compared with what
+# this installer is about to write. Anything it would not keep fails closed.
+Merge-PreservedConfig -Cfg $config -InstallPath $config.InstallRoot
+Invoke-InstallPreflight -Cfg $config
+
 try {
   Invoke-Runner -Mode 'stop-tray-task' -RunnerPath $runner -Cfg @{
     TrayTaskName = $config.TrayTaskName
@@ -388,7 +504,10 @@ if (-not (Test-Path $config.InstallRoot)) {
   New-Item -ItemType Directory -Path $config.InstallRoot -Force | Out-Null
 }
 
-Copy-Item -Path (Join-Path $PSScriptRoot '*') -Destination $config.InstallRoot -Recurse -Force
+$protectedInstallNames = @('scanner-bridge-config.json', 'installed-version.txt', 'bridge-state.json', 'update-drain.request', 'update-status.json', 'update.lock', '.ota')
+Get-ChildItem -Path $PSScriptRoot -Force | Where-Object { $protectedInstallNames -notcontains $_.Name } | ForEach-Object {
+  Copy-Item -Path $_.FullName -Destination $config.InstallRoot -Recurse -Force
+}
 
 $packageVersion = Get-BridgePackageVersion -SourcePath $PSScriptRoot
 

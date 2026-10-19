@@ -282,10 +282,14 @@ test("installer and runner preserve readers configuration", () => {
   assert.match(runner, /SESSION_HUB_SCANNER_SHARED_SECRET/);
   assert.match(installer, /shared_secret = \$Cfg\.SharedSecret/);
   assert.match(runner, /scanner-bridge-config\.json/);
-  assert.match(
-    fs.readFileSync(path.join(root, "update-session-hub-scanner.ps1"), "utf8"),
-    /Update-InstalledConfigVersion/,
+  // OTA: the updater never rewrites scanner-bridge-config.json (readers_json
+  // and shared_secret live there); it only verifies the config hash.
+  const updater = fs.readFileSync(
+    path.join(root, "update-session-hub-scanner.ps1"),
+    "utf8",
   );
+  assert.doesNotMatch(updater, /Update-InstalledConfigVersion/);
+  assert.match(updater, /Test-ConfigPreserved/);
 });
 
 test("registration preserves shared-secret, symbology and local binding scanner state", async () => {
