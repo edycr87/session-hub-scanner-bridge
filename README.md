@@ -256,25 +256,33 @@ Notas:
 - copia `node.exe` portable y `node_modules`, sin requerir Node instalado
 - si no te interesa levantar tasks al instante, pasá `--start-task false`, `--start-tray-task false` o `--start-updater-task false`
 
-## Múltiples lectores en la misma PC
+## Dos lectores USB en la misma PC y el mismo carrito
+
+El bridge soporta un proceso, un `host_id` y un binding compartido con varios lectores seriales. Cada lector se declara con un `reader_id` estable y su identidad física (`serial_port` y/o `scanner_device_id`). Si un lector configurado no aparece, falla cerrado para ese lector y los demás continúan.
+
+Identificá los dispositivos con `./discover-session-hub-readers.ps1` y conservá una sola instalación/task. Ejemplo:
 
 ```powershell
-.\install-session-hub-scanner.ps1 -HostId "sucursal-1-caja-1" -SerialPort "COM6" -ReaderDeviceId "USB\\VID_...\\001" -TaskName "SessionHubScannerBridge_Caja1"
-.\install-session-hub-scanner.ps1 -HostId "sucursal-2-caja-2" -SerialPort "COM7" -ReaderDeviceId "USB\\VID_...\\002" -TaskName "SessionHubScannerBridge_Caja2"
+$readers = '[{"reader_id":"caja-izquierda","serial_port":"COM6","scanner_device_id":"USB-READER-LEFT","serial_baud_rate":9600},{"reader_id":"caja-derecha","serial_port":"COM7","scanner_device_id":"USB-READER-RIGHT","serial_baud_rate":9600}]'
+.\install-session-hub-scanner.ps1 -HostId "sucursal-1-caja-1" -ReadersJson $readers
 ```
+
+El instalador persiste `readers_json` en `scanner-bridge-config.json`. El runner lo carga en cada arranque, por lo que el Scheduled Task único y las actualizaciones conservan la configuración. El instalador `.exe` acepta el mismo JSON con `--readers`.
+
+`--shared-secret` / `SESSION_HUB_SCANNER_SHARED_SECRET` y `--symbology` / `SESSION_HUB_SCANNER_DEFAULT_SYMBOLOGY` conservan el contrato de un lector. El instalador persiste esos valores locales para que el runner los inyecte al proceso, sin escribir el secreto en los logs ni en el Scheduled Task.
+
+Cada lector tiene su propio loop y buffer. Cada captura genera un `scan_id` criptográficamente único antes del WebSocket y envía `scan_id`, `reader_id` y `scanner_device_id` arriba, más `reader_id`, `scanner_device_id`, `serial_port`, origen y momento de captura en metadata. La cola de transporte se comparte por host y envía un scan por vez para preservar el carrito compartido.
+
+El bridge sólo consume ACKs cuyo `scan_id` coincide exactamente. Un ACK sin ID se registra como incompatibilidad y no confirma ningún scan. Tras timeout, desconexión o `MOBILE_CLIENT_NOT_CONNECTED`, `PRESUPUESTADOR_OWNER_NOT_CONNECTED` o `CONTROL_STOCK_CLIENT_NOT_CONNECTED`, reintenta el mismo ID y la misma atribución. El overflow registra `BRIDGE_QUEUE_LIMIT_EXCEEDED`; no hay reimpresión automática ni escrituras de negocio locales.
+
+La configuración legacy de un lector con `-SerialPort`/`-ReaderDeviceId` sigue funcionando. Con `ReadersJson`, las fuentes configuradas nunca caen a stdin ni seleccionan un COM diferente.
+
+### Límite actual de cierre E2E
+
+Este paquete produce IDs estables y atribución por lector, pero no demuestra idempotencia durable del carrito por sí solo. El cierre E2E requiere que el backend persista y deduplique por `(mobile_session_id, scan_id)`; `reader_id` es auditoría y nunca una partición de dedupe. Hasta que ese consumidor esté aplicado y probado en DEV, dos lectores representan una superficie bridge/transport validada, no una garantía de no doble suma del carrito. HID que no aparece como COM continúa como modo físico pendiente de descubrimiento y adaptador real.
 
 ## Troubleshooting
 
-- `Opening COM6: Unknown error code 121` o puerto inaccesible:
-- recrear el puerto desconectando y reconectando el lector
-- verificar que no haya otro proceso usando el COM
-- confirmar modo USB Virtual COM Port en el lector
-
-- No hay cambios de `binding` tras claim:
-- revisar `bridge.err` y `bridge.log` por `session_hub.error`
-- confirmar token válido y no usado
-
-- El tray no aparece:
-- revisar `tray.log`
-- revisar iconos ocultos de Windows
-- ejecutar `wscript.exe` sobre el launcher de Startup si hace falta
+- `serial.reader.failed`: confirmar COM e identidad exacta; el lector queda fail-closed.
+- `scanner.ack.unsupported_missing_scan_id`: backend anterior al ACK contractual; no habrá falso ACK.
+- La bandeja muestra el último scan/puerto y los logs siguen en `bridge.log` y `bridge.err`.

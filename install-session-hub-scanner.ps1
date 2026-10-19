@@ -5,6 +5,11 @@
   [string]$BaseUrl = 'https://devapp.dimensioncomercial.com.ar',
   [string]$SerialPort = 'COM6',
   [string]$ReaderDeviceId = '',
+  [string]$ReadersJson = '',
+  [string]$SharedSecret = '',
+  [string]$Symbology = '',
+  [string]$SerialFallback = 'false',
+  [string]$SerialInteractive = 'false',
   [string]$InstallRoot = "$env:ProgramData\SessionHubScannerBridge",
   [string]$TaskName = 'SessionHubScannerBridge',
   [string]$TrayTaskName = 'SessionHubScannerBridgeTray',
@@ -85,6 +90,11 @@ function Read-InstallerConfig {
     [string]$BaseUrlValue,
     [string]$SerialPortValue,
     [string]$ReaderDeviceIdValue,
+    [string]$ReadersJsonValue,
+    [string]$SharedSecretValue,
+    [string]$SymbologyValue,
+    [string]$SerialFallbackValue,
+    [string]$SerialInteractiveValue,
     [string]$InstallRootValue,
     [string]$TaskNameValue,
     [string]$TrayTaskNameValue,
@@ -108,6 +118,11 @@ function Read-InstallerConfig {
   $boundBaseUrl = if ($BaseUrlValue) { $BaseUrlValue } else { $null }
   $boundSerialPort = if ($SerialPortValue) { $SerialPortValue } else { $null }
   $boundReaderDeviceId = if ($ReaderDeviceIdValue) { $ReaderDeviceIdValue } else { $null }
+  $boundReadersJson = if ($ReadersJsonValue) { $ReadersJsonValue } else { $null }
+  $boundSharedSecret = if ($SharedSecretValue) { $SharedSecretValue } else { $null }
+  $boundSymbology = if ($SymbologyValue) { $SymbologyValue } else { $null }
+  $boundSerialFallback = if ($SerialFallbackValue) { $SerialFallbackValue } else { $null }
+  $boundSerialInteractive = if ($SerialInteractiveValue) { $SerialInteractiveValue } else { $null }
   $boundInstallRoot = if ($InstallRootValue) { $InstallRootValue } else { $null }
   $boundTaskName = if ($TaskNameValue) { $TaskNameValue } else { $null }
   $boundTrayTaskName = if ($TrayTaskNameValue) { $TrayTaskNameValue } else { $null }
@@ -130,6 +145,11 @@ function Read-InstallerConfig {
     BaseUrl = if ($boundBaseUrl) { $boundBaseUrl } else { if ($parsed.ContainsKey('baseurl')) { $parsed['baseurl'] } else { 'https://devapp.dimensioncomercial.com.ar' } }
     SerialPort = if ($boundSerialPort) { $boundSerialPort } else { if ($parsed.ContainsKey('serialport')) { $parsed['serialport'] } else { 'COM6' } }
     ReaderDeviceId = if ($boundReaderDeviceId) { $boundReaderDeviceId } else { if ($parsed.ContainsKey('readersdeviceid')) { $parsed['readersdeviceid'] } else { if ($parsed.ContainsKey('readerdeviceid')) { $parsed['readerdeviceid'] } else { '' } } }
+    ReadersJson = if ($boundReadersJson) { $boundReadersJson } else { if ($parsed.ContainsKey('readersjson')) { $parsed['readersjson'] } else { '' } }
+    SharedSecret = if ($boundSharedSecret) { $boundSharedSecret } else { if ($parsed.ContainsKey('sharedsecret')) { $parsed['sharedsecret'] } else { '' } }
+    Symbology = if ($boundSymbology) { $boundSymbology } else { if ($parsed.ContainsKey('symbology')) { $parsed['symbology'] } else { '' } }
+    SerialFallback = if ($boundSerialFallback) { $boundSerialFallback } else { if ($parsed.ContainsKey('serialfallback')) { $parsed['serialfallback'] } else { 'false' } }
+    SerialInteractive = if ($boundSerialInteractive) { $boundSerialInteractive } else { if ($parsed.ContainsKey('serialinteractive')) { $parsed['serialinteractive'] } else { 'false' } }
     InstallRoot = if ($boundInstallRoot) { $boundInstallRoot } else { if ($parsed.ContainsKey('installroot')) { $parsed['installroot'] } else { "$env:ProgramData\SessionHubScannerBridge" } }
     TaskName = if ($boundTaskName) { $boundTaskName } else { if ($parsed.ContainsKey('taskname')) { $parsed['taskname'] } else { 'SessionHubScannerBridge' } }
     TrayTaskName = if ($boundTrayTaskName) { $boundTrayTaskName } else { if ($parsed.ContainsKey('traytaskname')) { $parsed['traytaskname'] } else { 'SessionHubScannerBridgeTray' } }
@@ -207,6 +227,11 @@ function Write-BridgeConfig {
     base_url = $Cfg.BaseUrl
     serial_port = $Cfg.SerialPort
     reader_device_id = $Cfg.ReaderDeviceId
+    readers_json = $Cfg.ReadersJson
+    shared_secret = $Cfg.SharedSecret
+    symbology = $Cfg.Symbology
+    serial_fallback = $Cfg.SerialFallback
+    serial_interactive = $Cfg.SerialInteractive
     install_root = $InstallPath
     input_mode = 'serial'
     heartbeat_ms = $Cfg.HeartbeatMs
@@ -282,6 +307,7 @@ function Invoke-Runner {
   if ($Cfg.ContainsKey('BaseUrl') -and $Cfg.BaseUrl) { $argList += @('-BaseUrl', $Cfg.BaseUrl) }
   if ($Cfg.ContainsKey('SerialPort') -and $Cfg.SerialPort) { $argList += @('-SerialPort', $Cfg.SerialPort) }
   if ($Cfg.ContainsKey('ReaderDeviceId') -and $Cfg.ReaderDeviceId) { $argList += @('-ReaderDeviceId', $Cfg.ReaderDeviceId) }
+  if ($Cfg.ContainsKey('ReadersJson') -and $Cfg.ReadersJson) { $argList += @('-ReadersJson', $Cfg.ReadersJson) }
   if ($Cfg.ContainsKey('InputMode') -and $Cfg.InputMode) { $argList += @('-InputMode', $Cfg.InputMode) }
   if ($Cfg.ContainsKey('HeartbeatMs')) { $argList += @('-HeartbeatMs', [string]$Cfg.HeartbeatMs) }
   if ($Cfg.ContainsKey('SerialBaudRate')) { $argList += @('-SerialBaudRate', [string]$Cfg.SerialBaudRate) }
@@ -297,6 +323,11 @@ $config = Read-InstallerConfig -InputArgs $args `
   -BaseUrlValue $BaseUrl `
   -SerialPortValue $SerialPort `
   -ReaderDeviceIdValue $ReaderDeviceId `
+  -ReadersJsonValue $ReadersJson `
+  -SharedSecretValue $SharedSecret `
+  -SymbologyValue $Symbology `
+  -SerialFallbackValue $SerialFallback `
+  -SerialInteractiveValue $SerialInteractive `
   -InstallRootValue $InstallRoot `
   -TaskNameValue $TaskName `
   -TrayTaskNameValue $TrayTaskName `
@@ -379,6 +410,7 @@ $cfgTask = @{
   BaseUrl = $config.BaseUrl
   SerialPort = $config.SerialPort
   ReaderDeviceId = $config.ReaderDeviceId
+  ReadersJson = $config.ReadersJson
   InputMode = 'serial'
   HeartbeatMs = $config.HeartbeatMs
   SerialBaudRate = $config.SerialBaudRate

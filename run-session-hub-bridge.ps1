@@ -10,6 +10,11 @@ param(
   [string]$BaseUrl = 'https://devapp.dimensioncomercial.com.ar',
   [string]$SerialPort = 'COM6',
   [string]$ReaderDeviceId = '',
+  [string]$ReadersJson = '',
+  [string]$SharedSecret = '',
+  [string]$Symbology = '',
+  [string]$SerialFallback = 'false',
+  [string]$SerialInteractive = 'false',
   [string]$InputMode = 'serial',
   [int]$HeartbeatMs = 10000,
   [int]$SerialBaudRate = 9600,
@@ -228,6 +233,10 @@ function New-TrayTaskActionArgumentString {
 }
 
 function Set-BridgeEnv {
+  $configPath = Join-Path $root 'scanner-bridge-config.json'
+  if (Test-Path $configPath) {
+    try { $stored = Get-Content -Path $configPath -Raw | ConvertFrom-Json; if ([string]::IsNullOrWhiteSpace($ReadersJson) -and $stored.readers_json) { $ReadersJson = [string]$stored.readers_json }; if ([string]::IsNullOrWhiteSpace($SharedSecret) -and $stored.shared_secret) { $SharedSecret = [string]$stored.shared_secret }; if ([string]::IsNullOrWhiteSpace($Symbology) -and $stored.symbology) { $Symbology = [string]$stored.symbology }; if ($stored.serial_fallback -ne $null) { $SerialFallback = [string]$stored.serial_fallback }; if ($stored.serial_interactive -ne $null) { $SerialInteractive = [string]$stored.serial_interactive } } catch { Trace-Runner "No se pudo leer configuracion bridge: $($_.Exception.Message)" }
+  }
   Trace-Runner "Set-BridgeEnv: HostId=$HostId SerialPort=$SerialPort InputMode=$InputMode BaseUrl=$BaseUrl"
   $env:SESSION_HUB_BASE_URL = $BaseUrl
   $env:SESSION_HUB_SCANNER_HOST_ID = $HostId
@@ -235,10 +244,13 @@ function Set-BridgeEnv {
   $env:SESSION_HUB_SCANNER_INPUT_MODE = $InputMode
   if ($SerialPort) { $env:SESSION_HUB_SCANNER_SERIAL_PORT = $SerialPort }
   if ($ReaderDeviceId) { $env:SESSION_HUB_SCANNER_DEVICE_ID = $ReaderDeviceId }
+  if ($ReadersJson) { $env:SESSION_HUB_SCANNER_READERS = $ReadersJson }
+  if ($SharedSecret) { $env:SESSION_HUB_SCANNER_SHARED_SECRET = $SharedSecret }
+  if ($Symbology) { $env:SESSION_HUB_SCANNER_DEFAULT_SYMBOLOGY = $Symbology }
   $env:SESSION_HUB_SCANNER_SERIAL_BAUD_RATE = [string]$SerialBaudRate
   $env:SESSION_HUB_SCANNER_SERIAL_WAIT_MS = [string]$SerialWaitMs
-  $env:SESSION_HUB_SCANNER_SERIAL_FALLBACK_TO_STDIN = '0'
-  $env:SESSION_HUB_SCANNER_SERIAL_INTERACTIVE = '0'
+  $env:SESSION_HUB_SCANNER_SERIAL_FALLBACK_TO_STDIN = $SerialFallback
+  $env:SESSION_HUB_SCANNER_SERIAL_INTERACTIVE = $SerialInteractive
   $env:SESSION_HUB_SCANNER_HEARTBEAT_MS = [string]$HeartbeatMs
 }
 
@@ -258,7 +270,8 @@ function Resolve-BridgeLaunchCommand {
       '--heartbeat-ms', $HeartbeatMs,
       '--serial-baud-rate', $SerialBaudRate,
       '--serial-wait-ms', $SerialWaitMs,
-      '--serial-fallback', '0'
+      '--serial-fallback', $SerialFallback,
+      '--serial-interactive', $SerialInteractive
     )
 
     if ($ReaderDeviceId) {
@@ -291,7 +304,8 @@ function Resolve-BridgeLaunchCommand {
     '--heartbeat-ms', $HeartbeatMs,
     '--serial-baud-rate', $SerialBaudRate,
     '--serial-wait-ms', $SerialWaitMs,
-    '--serial-fallback', '0'
+    '--serial-fallback', $SerialFallback,
+    '--serial-interactive', $SerialInteractive
   )
 
   if ($ReaderDeviceId) {
