@@ -1,0 +1,53 @@
+name: Dual-reader Windows QA
+
+on:
+  pull_request:
+    paths:
+      - bridge.js
+      - '*.ps1'
+      - installer-launcher.js
+      - package.json
+      - package-lock.json
+      - test/**
+      - .github/workflows/dual-reader-windows-qa.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dual-reader-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked Node dependencies
+        run: npm ci
+      - name: Run dual-reader integration checks
+        run: npm run test:dual-reader
+      - name: Parse repository PowerShell with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $files = @(git -C $env:GITHUB_WORKSPACE ls-files -- '*.ps1')
+          if (-not $files) { throw 'No PowerShell files found.' }
+          foreach ($relativePath in $files) {
+            $file = Join-Path $env:GITHUB_WORKSPACE $relativePath
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { $errors | ForEach-Object { Write-Error ('{0}: {1}' -f $relativePath, $_.Message) }; exit 1 }
+          }
+      - name: Parse repository PowerShell with PowerShell 7
+        shell: pwsh
+        run: |
+          $files = @(git -C $env:GITHUB_WORKSPACE ls-files -- '*.ps1')
+          if (-not $files) { throw 'No PowerShell files found.' }
+          foreach ($relativePath in $files) {
+            $file = Join-Path $env:GITHUB_WORKSPACE $relativePath
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { $errors | ForEach-Object { Write-Error ('{0}: {1}' -f $relativePath, $_.Message) }; exit 1 }
+          }

@@ -4,7 +4,9 @@
   "version": "1.0.0",
   "main": "bridge.js",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "test": "node --test test/*.test.js",
+    "test:dual-reader": "node --test test/dual-reader.e2e.test.js"
   },
   "dependencies": {
     "serialport": "^12.0.0",

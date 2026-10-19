@@ -52,6 +52,10 @@ $state = [ordered]@{
   LastEventAt = Get-Date
   LastSerialPort = '(sin puerto)'
   LastDevice = '-'
+  ReaderStates = @{}
+  BindingStatus = 'unknown'
+  BindingTarget = '-'
+  BindingOwner = '-'
   LastScan = ''
   LastScanType = ''
   LastScanTs = $null
@@ -253,6 +257,19 @@ function Update-ConnectionStateFromLog {
       $state.LastEvent = "{0} :: {1}" -f $task.label, ($task.status -or $task.event -or '')
       $state.LastEventAt = Get-Date
 
+      if ($task.reader_id) {
+        $readerKey = [string]$task.reader_id
+        if (-not $state.ReaderStates.ContainsKey($readerKey)) { $state.ReaderStates[$readerKey] = [ordered]@{ State = 'unknown'; Port = '-'; Device = '-'; LastScan = ''; Error = '' } }
+        $readerState = $state.ReaderStates[$readerKey]
+        if ($task.port) { $readerState.Port = [string]$task.port }
+        if ($task.serial_port) { $readerState.Port = [string]$task.serial_port }
+        if ($task.scanner_device_id) { $readerState.Device = [string]$task.scanner_device_id }
+        if ($task.status -eq 'serial.reader.open') { $readerState.State = 'open' }
+        if ($task.status -eq 'serial.reader.closed') { $readerState.State = 'disconnected' }
+        if ($task.status -eq 'serial.reader.failed' -or $task.status -eq 'serial.reader.error') { $readerState.State = 'error'; $readerState.Error = [string]$task.message }
+        if ($task.status -eq 'scan.captured' -and $task.value) { $readerState.LastScan = [string]$task.value }
+      }
+
       switch ($task.label) {
         'bridge.connected' {
           $state.Connected = $true
@@ -286,10 +303,20 @@ function Update-ConnectionStateFromLog {
           if ($task.status -eq 'scanner.registered') {
             $state.LastScanStatus = 'registered'
           }
+          if ($task.scanner_state) {
+            if ($task.scanner_state.target_type) { $state.BindingTarget = [string]$task.scanner_state.target_type }
+            if ($task.scanner_state.owner_mobile_session_id) { $state.BindingOwner = [string]$task.scanner_state.owner_mobile_session_id }
+          }
           if ($task.status -eq 'binding.bound') {
+            $state.BindingStatus = 'bound'
             $state.LastScanStatus = 'bound'
           }
+          if ($task.status -eq 'binding.updated') {
+            $state.BindingStatus = 'updated'
+          }
           if ($task.status -eq 'binding.released') {
+            $state.BindingStatus = 'released'
+            $state.BindingOwner = '-'
             $state.LastScanStatus = 'released'
           }
           if ($task.status -eq 'serial.port.failed' -and $task.message) {
@@ -527,6 +554,7 @@ $timer.Interval = [Math]::Max(500, [int]$PollMs)
 function Get-StatusMessage {
   $taskState = Refresh-TaskState -Force
   $errorLine = if ($state.LastError) { "`nError: $($state.LastError)" } else { '' }
+  $readerLines = if ($state.ReaderStates.Count -gt 0) { ($state.ReaderStates.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key): $($_.Value.State) | $($_.Value.Port) | $($_.Value.Device) | ult=$($_.Value.LastScan)" }) -join "`n" } else { '(sin lectores seriales observados)' }
   return @"
 Estado tray del SessionHub Scanner Bridge
 
@@ -537,6 +565,9 @@ Running: $($taskState.running_count)
 Conexión: $([bool]$state.Connected)
 Puerto: $($state.LastSerialPort)
 Scanner: $($state.LastDevice)
+Lectores:
+$readerLines
+Binding: $($state.BindingStatus) | Target: $($state.BindingTarget) | Owner: $($state.BindingOwner)
 Último scan: $($state.LastScan)
 Tipo: $($state.LastScanType)
 Ack: $($state.LastAck)
