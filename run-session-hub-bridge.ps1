@@ -252,6 +252,23 @@ function Set-BridgeEnv {
   $env:SESSION_HUB_SCANNER_SERIAL_FALLBACK_TO_STDIN = $SerialFallback
   $env:SESSION_HUB_SCANNER_SERIAL_INTERACTIVE = $SerialInteractive
   $env:SESSION_HUB_SCANNER_HEARTBEAT_MS = [string]$HeartbeatMs
+  # OTA: local state for the updater's inactivity/health checks and the drain
+  # request file the updater writes; both live next to the config, never in it.
+  $env:SESSION_HUB_SCANNER_STATE_FILE = Join-Path $root 'bridge-state.json'
+  $env:SESSION_HUB_SCANNER_DRAIN_FILE = Join-Path $root 'update-drain.request'
+}
+
+function Test-OtaActivationInProgress {
+  $journalPath = Join-Path (Join-Path $root '.ota') 'journal.json'
+  if (-not (Test-Path -LiteralPath $journalPath)) {
+    return $false
+  }
+  try {
+    $journal = [System.IO.File]::ReadAllText($journalPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    return (@('backup', 'activate') -contains [string]$journal.phase)
+  } catch {
+    return $false
+  }
 }
 
 function Get-RunningBridgeProcesses {
@@ -417,6 +434,16 @@ function Stop-RunningBridge {
 
 function Start-Bridge {
   Trace-Runner "Start-Bridge requested: HostId=$HostId BaseUrl=$BaseUrl InputMode=$InputMode SerialPort=$SerialPort"
+  if (Test-OtaActivationInProgress) {
+    Trace-Runner 'Start-Bridge refused: OTA payload swap in progress; the updater restarts the bridge.'
+    Write-Host 'Actualizacion en curso: el updater vuelve a iniciar el bridge.'
+    return
+  }
+  $staleDrain = Join-Path $root 'update-drain.request'
+  if (Test-Path -LiteralPath $staleDrain) {
+    Remove-Item -LiteralPath $staleDrain -Force -ErrorAction SilentlyContinue
+    Trace-Runner 'Removed stale update-drain.request before start.'
+  }
   Set-Location $root
   Set-BridgeEnv
 

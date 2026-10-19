@@ -38,6 +38,8 @@ Copy-Item -Path (Join-Path $source 'tray-session-hub-bridge.ps1') -Destination $
 Copy-Item -Path (Join-Path $source 'package.json') -Destination $payload -Force
 Copy-Item -Path (Join-Path $source 'package-lock.json') -Destination $payload -Force
 Copy-Item -Path (Join-Path $source 'bridge.js') -Destination $payload -Force
+Copy-Item -Path (Join-Path $source 'diagnose-session-hub-scanner.ps1') -Destination $payload -Force
+Copy-Item -Path (Join-Path $source 'diagnose-session-hub-scanner.js') -Destination $payload -Force
 Copy-Item -Path $nodePath -Destination (Join-Path $payload 'node.exe') -Force
 
 $nodeModules = Join-Path $source 'node_modules'
