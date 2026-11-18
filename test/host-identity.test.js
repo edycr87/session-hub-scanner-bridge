@@ -235,7 +235,10 @@ test("SCANNER_HOST_ID_IN_USE: reports the conflict, stops its readers and does n
     assert.equal(run.connections.length, 1, "the agent reconnected after the rejection");
     assert.equal(run.logs.some((line) => line.label === "bridge.status" && line.status === "reconnecting"), false);
     assert.equal(run.exitCode(), null, "the agent must stay alive (an exit would make the scheduled task loop)");
-    assert.equal(run.logs.filter((line) => line.status === "serial.reader.open").length, 0, "no reader may stay open while in conflict");
+    // the reader may have opened before the rejection arrived; it must be closed after it
+    const conflictAt = run.logs.findIndex((line) => line.status === "host.conflict");
+    assert.equal(run.logs.slice(conflictAt).filter((line) => line.status === "serial.reader.open").length, 0, "a reader opened after the conflict");
+    await eventually(() => run.state() && run.state().readers[0].state !== "open", "reader stayed open while in conflict");
   } finally {
     await run.stop();
   }
