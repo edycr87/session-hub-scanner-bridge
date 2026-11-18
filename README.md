@@ -32,7 +32,7 @@ Este apartado es el contrato del agente. Lo que sigue describe lo que el código
 - Más de un candidato y ninguno recordado: estado `ambiguous`. El agente no elige, no abre ninguno y no toma "el primero". El ícono avisa y ofrece el selector (ver abajo). Dos dispositivos con el mismo `vendorId:productId` y sin número de serie no se pueden distinguir: tampoco se elige ninguno.
 - Con una identidad recordada o elegida: sólo se abre el puerto que coincide con ella. Si no está, el estado es `waiting` y se espera; nunca se toma otro dispositivo aunque sea el único. Si el lector aparece después del arranque, o desaparece y vuelve con otro número de COM (por ejemplo al pasar de teclado USB-HID a puerto serie USB-VCOM), el agente lo vuelve a abrir solo.
 - Si el lector abierto desaparece de la lista de puertos, el agente cierra el puerto y vuelve a esperar.
-- Fijarlo a mano: `-ReaderUsbId <vid:pid[/serie]>` en el instalador (se guarda como `reader_usb_id`), o `--reader-usb-id`; también la elección desde el ícono. `-SerialPort`/`--serial-port` sigue existiendo como fijación explícita por número de COM y no se usa salvo que se declare. `--readers` (varios lectores) conserva su comportamiento.
+- Fijarlo a mano: `-ReaderUsbId <vid:pid[/serie]>` en el instalador (se guarda como `reader_usb_id`), o `--reader-usb-id`; también la elección desde el ícono, o `run-session-hub-bridge.ps1 -Mode choose-reader -ReaderUsbId <vid:pid[/serie]>` (y `-Mode forget-reader`) con permisos de administrador. `-SerialPort`/`--serial-port` sigue existiendo como fijación explícita por número de COM y no se usa salvo que se declare. `--readers` (varios lectores) conserva su comportamiento.
 
 ### Más de un candidato: elegir
 
@@ -54,12 +54,13 @@ Este apartado es el contrato del agente. Lo que sigue describe lo que el código
 
 ### Estado visible
 
-- El ícono muestra: puesto (hostname), estado del lector (`waiting` esperando, `open` abierto, `failed` falló, `disconnected` desconectado, `ambiguous` ambiguo) o conflicto de nombre (`host_conflict`), y el puerto activo como referencia.
+- El ícono muestra: puesto (hostname), estado del lector (`waiting` esperando, `open` abierto, `failed` falló, `disconnected` desconectado, `ambiguous` ambiguo) o estado del puesto (`host_conflict` conflicto de nombre, `superseded` reemplazado por otra conexión de la misma instalación), y el puerto activo como referencia.
 - El mismo estado viaja al servidor: en `scanner.register` y en cada `scanner.heartbeat`, dentro de `capabilities.readers` (lista con `reader_id`, `state`, `serial_port`, `vendor_id`, `product_id`, número de serie si lo hay y, si es ambiguo, los candidatos). El servidor no lo exige.
 
 ### Instalación y reinstalación
 
-- El diagnóstico previo ya no bloquea una reinstalación porque cambien nombre de puesto, nombre visible o puerto: lo declara como migración intencional (aviso con valor viejo y nuevo). Un cambio de dirección del servidor sigue bloqueando. Un `bridge.js` instalado que no corresponde a ningún Source versionado sigue bloqueando (`UNKNOWN_BRIDGE_SOURCE`): no se acredita agregando su hash; el camino es el manual explícito (copia de respaldo y reinstalación con `-AcknowledgeDiagnosticDrop` tras leer el informe, o el procedimiento que apruebe quien revisa).
+- El diagnóstico previo ya no bloquea una reinstalación porque cambien nombre de puesto, nombre visible o puerto: lo declara como migración intencional (aviso con valor viejo y nuevo). Un cambio de dirección del servidor sigue bloqueando. Un `bridge.js` instalado que no corresponde a ningún Source versionado sigue bloqueando (`UNKNOWN_BRIDGE_SOURCE`): no se acredita agregando su hash y `-AcknowledgeDiagnosticDrop` no lo desbloquea (sólo cubre claves de configuración que la reinstalación no conserva). El camino es manual y explícito: leer el informe del diagnóstico, hacer copia de respaldo y retirar a mano la instalación anterior (tareas y carpeta), o seguir el procedimiento que apruebe quien revisa; recién entonces se instala.
+- En una reinstalación, si no se pasa `-BaseUrl`, se toma la dirección del servidor guardada en la configuración anterior (es la que ya usaba, no un valor por defecto); si no hay ninguna, el instalador falla.
 - Esta versión no incluye claves, canales ni secretos en el paquete. El secreto compartido, si el servidor lo exige, se entrega aparte y se pasa en la instalación.
 
 ## Requisitos
