@@ -48,7 +48,12 @@ $ProtectedNames = @(
   'runner.log',
   'tray.log',
   'update.log',
-  '.ota'
+  '.ota',
+  # Written at run time by the agent and the one folder users may write:
+  # never shipped, never touched by the updater.
+  'reader-identity.json',
+  'installation-id.json',
+  'ui'
 )
 $RequiredPackageFiles = @(
   'bridge.js',

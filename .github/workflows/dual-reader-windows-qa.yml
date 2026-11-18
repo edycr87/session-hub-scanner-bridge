@@ -76,25 +76,25 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
             if ($errors.Count) { $errors | ForEach-Object { Write-Error ('{0}: {1}' -f $relativePath, $_.Message) }; exit 1 }
           }
-      - name: Build strict 1.2.0 package and record immutable evidence
+      - name: Build strict 1.3.0 package and record immutable evidence
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -ne '1.2.0') { throw 'VERSION_MISMATCH' }
+          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -ne '1.3.0') { throw 'VERSION_MISMATCH' }
           $out = Join-Path $env:RUNNER_TEMP 'scanner-artifact'
           New-Item -ItemType Directory -Path $out | Out-Null
-          $zip = Join-Path $out 'session-hub-scanner-bridge-1.2.0.zip'
-          ./build-session-hub-scanner-package.ps1 -SourceRoot $env:GITHUB_WORKSPACE -DestinationPath $zip -Version '1.2.0'
+          $zip = Join-Path $out 'session-hub-scanner-bridge-1.3.0.zip'
+          ./build-session-hub-scanner-package.ps1 -SourceRoot $env:GITHUB_WORKSPACE -DestinationPath $zip -Version '1.3.0'
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $archive = [IO.Compression.ZipFile]::OpenRead($zip)
           try {
-            $forbidden = '(^|/)(scanner-bridge-config\.json|installed-version\.txt|bridge-state\.json|update-drain\.request|update-status\.json|update\.lock|\.ota|\.env(?:\.[^/]*)?|private\.pem|[^/]*\.(?:key|pfx|p12)|(?:bridge|runner|tray|update)\.(?:log|err))($|/)'
+            $forbidden = '(^|/)(scanner-bridge-config\.json|installed-version\.txt|bridge-state\.json|update-drain\.request|update-status\.json|update\.lock|\.ota|reader-identity\.json|installation-id\.json|ui|\.env(?:\.[^/]*)?|private\.pem|[^/]*\.(?:key|pfx|p12)|(?:bridge|runner|tray|update)\.(?:log|err))($|/)'
             foreach ($entry in $archive.Entries) {
               if (($entry.FullName -replace '\\', '/') -match $forbidden) { throw "Forbidden package entry: $($entry.FullName)" }
             }
           } finally { $archive.Dispose() }
           $evidence = [ordered]@{
-            version = '1.2.0'
+            version = '1.3.0'
             source_commit = (git rev-parse HEAD).Trim()
             pull_request_head = '${{ github.event.pull_request.head.sha }}'
             node_version = (node --version).Trim()
@@ -108,7 +108,7 @@ jobs:
         id: package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 immutable ref
         with:
-          name: scanner-1.2.0-${{ github.event.pull_request.head.sha || github.sha }}
+          name: scanner-1.3.0-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/scanner-artifact/
           if-no-files-found: error
           retention-days: 14

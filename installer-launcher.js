@@ -108,27 +108,41 @@ function main() {
     installerScript,
   ];
 
+  // No shared defaults: the server address is mandatory, the station name is
+  // the hostname (decided by the installer) unless one is declared explicitly,
+  // and the reader is detected automatically unless it is pinned explicitly.
+  const baseUrl = args["base-url"] || args.baseurl || "";
+  if (!`${baseUrl}`.trim()) {
+    console.error(
+      "Falta --base-url (direccion del servidor). No hay direccion por defecto: no se instala.",
+    );
+    process.exit(1);
+  }
+  addPowerShellArg(
+    installArgs,
+    "KeepHostId",
+    args["keep-host-id"] || args.keephostid || "",
+  );
   addPowerShellArg(
     installArgs,
     "HostId",
-    args["host-id"] || args.hostid || "sucursal-1-caja-1",
+    args["host-id"] || args.hostid || "",
   );
   addPowerShellArg(
     installArgs,
     "DisplayName",
-    args["display-name"] || args.displayname || "Scanner Caja 1",
+    args["display-name"] || args.displayname || "",
   );
-  addPowerShellArg(
-    installArgs,
-    "BaseUrl",
-    args["base-url"] ||
-      args.baseurl ||
-      "https://devapp.dimensioncomercial.com.ar",
-  );
+  addPowerShellArg(installArgs, "BaseUrl", baseUrl);
   addPowerShellArg(
     installArgs,
     "SerialPort",
-    args["serial-port"] || args.serialport || "COM6",
+    args["serial-port"] || args.serialport || "",
+  );
+  addPowerShellArg(
+    installArgs,
+    "ReaderUsbId",
+    args["reader-usb-id"] || args.readerusbid || "",
   );
   addPowerShellArg(
     installArgs,
