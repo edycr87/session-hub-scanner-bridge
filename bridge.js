@@ -150,7 +150,7 @@ const HOST_ID_MAX = 40;
 function normalizeHostId(value) {
   return String(value || "")
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/-+/g, "-")
@@ -240,7 +240,7 @@ function readIdentityFile(file) {
   if (!file) return null;
   try {
     const parsed = JSON.parse(
-      fs.readFileSync(file, "utf8").replace(/^﻿/, ""),
+      fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""),
     );
     const vendor = hex4(parsed.vendor_id);
     const product = hex4(parsed.product_id);
@@ -271,7 +271,7 @@ function loadInstallationId(file) {
   if (file) {
     try {
       const parsed = JSON.parse(
-        fs.readFileSync(file, "utf8").replace(/^﻿/, ""),
+        fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""),
       );
       if (valid(parsed.installation_id)) return parsed.installation_id;
     } catch (_) {}
@@ -1217,7 +1217,7 @@ function pollChoiceRequest() {
       recordChoice({ nonce: null, action: null }, "rejected", "CHOICE_REQUEST_INVALID");
       return false;
     }
-    text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
+    text = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   } catch (_) {
     return false;
   }
