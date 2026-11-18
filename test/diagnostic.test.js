@@ -257,7 +257,9 @@ test("dormant Caja2 and Caja3 preserve independent config/state and block consol
 
 test("current reviewed bridge hash is recognized; missing COM does not diagnose hardware failure", () => {
   const installed = targetRoot([value("input_mode", "keyboard"), value("serial_port", "COM6")]);
-  installed.files[0].sha256 = require("node:crypto").createHash("sha256").update(fs.readFileSync(path.join(root, "bridge.js"))).digest("hex");
+  // The 1.2.0 reviewed Source hash. The 1.3.0 bridge.js is not in the allowlist
+  // until a reviewed release change adds it with its evidence of origin.
+  installed.files[0].sha256 = "80eb700fa6d9625c63541b9cf8f0a925f03727e58b054c0e3699865877f7cdb0";
   const result = diag.evaluate(facts({ roots: [installed], serial_ports: [] }), { context: "ota" });
   assert.equal(result.verdict, "PASS");
   assert.ok(result.identified[0].source.includes("1.2.0"));
@@ -311,4 +313,83 @@ test("Windows collector blocks unknown Source in three dormant roots and preserv
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- 1.3.0: station name, display name and COM port are migrations, not blockers ----
+const oldInstall = () => [
+  value("host_id", "sucursal-1-caja-1"),
+  value("display_name", "Scanner Caja 1"),
+  value("serial_port", "COM6"),
+  value("base_url", "https://devapp.example.test/"),
+];
+const hostnamePlan = (overrides = {}) =>
+  plannedDefaults({ host_id: "pc-caja-7", display_name: "PC-CAJA-7", serial_port: "", base_url: "https://devapp.example.test", host_id_migration: true, ...overrides });
+
+test("host_id, display_name and serial_port migration is a warning only with host_id_migration declared", () => {
+  const f = facts({ roots: [targetRoot(oldInstall())] });
+  const declared = diag.evaluate(f, { context: "install", planned: hostnamePlan() });
+  assert.equal(declared.verdict, "PASS", JSON.stringify(declared.blockers));
+  assert.deepEqual(declared.warnings.filter((w) => w.code === "VALUE_MIGRATION").map((w) => w.detail.split(":")[0]).sort(), ["display_name", "host_id", "serial_port"]);
+  const hostWarning = declared.warnings.find((w) => w.detail.startsWith("host_id:"));
+  assert.ok(hostWarning.detail.includes("sucursal-1-caja-1") && hostWarning.detail.includes("pc-caja-7"), "old -> new must be visible");
+  assert.ok(declared.warnings.find((w) => w.detail.startsWith("serial_port:")).detail.includes("(automatic)"));
+});
+
+test("undeclared host_id change still blocks VALUE_WOULD_CHANGE", () => {
+  const f = facts({ roots: [targetRoot(oldInstall())] });
+  const result = diag.evaluate(f, { context: "install", planned: hostnamePlan({ host_id_migration: undefined }) });
+  assert.equal(result.verdict, "BLOCK");
+  assert.equal(result.blockers.filter((b) => b.code === "VALUE_WOULD_CHANGE").length, 3);
+  const falseFlag = diag.evaluate(f, { context: "install", planned: hostnamePlan({ host_id_migration: false }) });
+  assert.equal(falseFlag.verdict, "BLOCK");
+});
+
+test("base_url change still blocks VALUE_WOULD_CHANGE even when the migration is declared", () => {
+  const f = facts({ roots: [targetRoot(oldInstall())] });
+  const result = diag.evaluate(f, { context: "install", planned: hostnamePlan({ base_url: "https://other.example.test" }) });
+  assert.equal(result.verdict, "BLOCK");
+  assert.deepEqual(codes(result), ["VALUE_WOULD_CHANGE"]);
+  assert.ok(result.blockers[0].detail.startsWith("base_url"));
+});
+
+test("the migration declaration covers only the three keys, not other stored values", () => {
+  const keys = [...oldInstall(), value("heartbeat_ms", "5000"), value("symbology", "QR")];
+  const result = diag.evaluate(facts({ roots: [targetRoot(keys)] }), { context: "install", planned: hostnamePlan() });
+  assert.equal(result.verdict, "BLOCK");
+  assert.deepEqual(result.blockers.map((b) => b.detail.split(":")[0]).sort(), ["heartbeat_ms", "symbology"]);
+});
+
+test("old task arguments and machine variables for the migrated keys warn when declared, block when not", () => {
+  const f = facts({
+    roots: [targetRoot(oldInstall())],
+    tasks: [{ name: "SessionHubScannerBridge", root_hint: TARGET, action_arguments_redacted: '-Mode run -Root "' + TARGET + '" -HostId "sucursal-1-caja-1" -SerialPort "COM6"' }],
+    env: [{ scope: "Machine", name: "SESSION_HUB_SCANNER_SERIAL_PORT", kind: "value", present: true, value: "COM6" }],
+  });
+  const declared = diag.evaluate(f, { context: "install", planned: hostnamePlan() });
+  assert.equal(declared.verdict, "PASS", JSON.stringify(declared.blockers));
+  assert.ok(declared.warnings.some((w) => w.code === "TASK_SETTING_MIGRATION"));
+  assert.ok(declared.warnings.some((w) => w.code === "ENV_SETTING_MIGRATION"));
+  const undeclared = diag.evaluate(f, { context: "install", planned: hostnamePlan({ host_id_migration: undefined }) });
+  assert.ok(codes(undeclared).includes("TASK_SETTING_WOULD_CHANGE"));
+  assert.ok(codes(undeclared).includes("ENV_SETTING_WOULD_CHANGE"));
+});
+
+test("unknown bridge hash still blocks UNKNOWN_BRIDGE_SOURCE: declaring the migration or acknowledging does not accredit it, and no hash is added", () => {
+  const installed = targetRoot(oldInstall());
+  installed.files[0].sha256 = "0".repeat(64);
+  const result = diag.evaluate(facts({ roots: [installed] }), { context: "install", planned: hostnamePlan(), acknowledgeDrop: ["UNKNOWN_BRIDGE_SOURCE"] });
+  assert.equal(result.verdict, "BLOCK");
+  assert.ok(codes(result).includes("UNKNOWN_BRIDGE_SOURCE"));
+  // The tool never learns a hash from the machine it inspects: the allowlist is
+  // a constant of the reviewed Source, and what it holds is changed only by a
+  // reviewed change that carries the evidence of origin.
+  const source = fs.readFileSync(path.join(root, "diagnose-session-hub-scanner.js"), "utf8");
+  assert.equal(/KNOWN_BRIDGE_SOURCES\s*\[[^\]]+\]\s*=/.test(source), false, "the allowlist is mutated at run time");
+  assert.equal(/facts\.[a-z_.]*sha256[^;]*KNOWN_BRIDGE_SOURCES|KNOWN_BRIDGE_SOURCES\[[^\]]*\]\s*=/.test(source), false);
+});
+
+test("a reinstall over a 1.3.0 config keeps passing: its new keys are known to the evaluator", () => {
+  const keys = [value("host_id_source", "hostname"), value("reader_usb_id", ""), value("host_id", "pc-caja-7")];
+  const result = diag.evaluate(facts({ roots: [targetRoot(keys)] }), { context: "install", planned: hostnamePlan() });
+  assert.equal(result.verdict, "PASS", JSON.stringify(result.blockers));
 });

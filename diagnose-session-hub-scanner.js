@@ -45,7 +45,17 @@ const NEW_INSTALLER_KEYS = [
   "install_updater",
   "update_window",
   "update_quiet_seconds",
+  // 1.3.0: how the station name was decided and an optional manual reader pin.
+  "host_id_source",
+  "reader_usb_id",
 ];
+// Station name, display name and COM port are decided by the installer itself
+// from 1.3.0 (hostname + automatic reader detection). When the plan declares
+// `host_id_migration`, a stored value that differs is an intentional migration:
+// a visible warning with old -> new, never a block. Everything else (for
+// example base_url) keeps blocking, and an installed bridge.js that matches no
+// versioned Source keeps blocking (UNKNOWN_BRIDGE_SOURCE) whatever is declared.
+const MIGRATABLE_KEYS = ["host_id", "display_name", "serial_port"];
 // Values a reinstall would overwrite with the planned (explicit or default)
 // value. A stored value that differs blocks the install.
 const COMPARED_KEYS = [
@@ -188,6 +198,9 @@ function findRedactionViolations(node, trail = "$", out = []) {
   return out;
 }
 
+function isMigration(planned, key) {
+  return Boolean(planned && planned.host_id_migration === true && MIGRATABLE_KEYS.includes(key));
+}
 function configEntries(root) {
   const map = {};
   for (const entry of (root.config && root.config.keys) || []) map[entry.name] = entry;
@@ -277,7 +290,11 @@ function evaluate(facts, options = {}) {
         const before = normFor(key, entry.value);
         if (before === "") continue;
         const after = normFor(key, planned[key]);
-        if (before !== after) block("VALUE_WOULD_CHANGE", key + ": '" + before + "' -> '" + after + "'");
+        if (before !== after) {
+          const detail = key + ": '" + before + "' -> '" + (after === "" ? "(automatic)" : after) + "'";
+          if (isMigration(planned, key)) warn("VALUE_MIGRATION", detail);
+          else block("VALUE_WOULD_CHANGE", detail);
+        }
       }
       if (storedReaders.length) {
         if (!planned.readers) block("READERS_WOULD_BE_LOST", storedReaders.length + " reader(s)");
@@ -290,15 +307,21 @@ function evaluate(facts, options = {}) {
       for (const env of facts.env || []) {
         const key = ENV_TO_KEY[env.name];
         if (!key || env.kind !== "value") continue;
-        if (normFor(key, env.value) !== normFor(key, planned[key]))
-          block("ENV_SETTING_WOULD_CHANGE", env.scope + ":" + env.name + " '" + env.value + "' vs planned '" + normFor(key, planned[key]) + "'");
+        if (normFor(key, env.value) !== normFor(key, planned[key])) {
+          const detail = env.scope + ":" + env.name + " '" + env.value + "' vs planned '" + normFor(key, planned[key]) + "'";
+          if (isMigration(planned, key)) warn("ENV_SETTING_MIGRATION", detail);
+          else block("ENV_SETTING_WOULD_CHANGE", detail);
+        }
       }
       for (const task of facts.tasks || []) {
         const args = parseTaskArgs(task.action_arguments_redacted);
         for (const [arg, key] of Object.entries(TASK_ARG_TO_KEY)) {
           if (args[arg] === undefined || args[arg] === "") continue;
-          if (normFor(key, args[arg]) !== normFor(key, planned[key]))
-            block("TASK_SETTING_WOULD_CHANGE", task.name + " -" + arg + " '" + args[arg] + "' vs planned '" + normFor(key, planned[key]) + "'");
+          if (normFor(key, args[arg]) !== normFor(key, planned[key])) {
+            const detail = task.name + " -" + arg + " '" + args[arg] + "' vs planned '" + normFor(key, planned[key]) + "'";
+            if (isMigration(planned, key)) warn("TASK_SETTING_MIGRATION", detail);
+            else block("TASK_SETTING_WOULD_CHANGE", detail);
+          }
         }
       }
     } else {
@@ -326,7 +349,7 @@ function parseArgs(argv) {
   return out;
 }
 function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8").replace(/^﻿/, ""));
+  return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 }
 
 function main() {
@@ -357,6 +380,7 @@ module.exports = {
   SECRET_NAME_RE,
   NEW_INSTALLER_KEYS,
   COMPARED_KEYS,
+  MIGRATABLE_KEYS,
   KNOWN_BRIDGE_SOURCES,
   evaluate,
   findRedactionViolations,
