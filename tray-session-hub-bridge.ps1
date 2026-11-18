@@ -2,7 +2,7 @@
   [string]$Root = 'C:\gestor_produccion\backend\tools\session-hub-scanner-bridge',
   [string]$TaskName = 'SessionHubScannerBridge',
   [string]$BridgeTaskName = 'SessionHubScannerBridge',
-  [string]$HostId = 'sucursal-1-caja-1',
+  [string]$HostId = '',
   [int]$TailLines = 80,
   [int]$PollMs = 1500,
   [int]$RecentScanMs = 2000,
@@ -43,6 +43,38 @@ $runnerScript = Join-Path $root 'run-session-hub-bridge.ps1'
 $outErr = Join-Path $root 'tray.log'
 $updateStatusPath = Join-Path $root 'update-status.json'
 $script:UpdateAlertShown = ''
+
+$stateFilePath = Join-Path $root 'bridge-state.json'
+$uiPath = Join-Path $root 'ui'
+$script:DeclaredHostId = $HostId
+$script:BridgeState = $null
+$script:BridgeStateFresh = $false
+$script:SeenChoiceNonce = $null
+$script:SeenChoiceInitialized = $false
+$script:SelectorSignature = ''
+$script:SelectorOpen = $false
+$script:ConflictShown = $false
+
+# Same normalization as the agent: the station is its hostname unless a name was
+# declared. The agent state file (bridge-state.json) is the source of truth once
+# it exists; this only covers the first seconds.
+function ConvertTo-StationId {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+  $decomposed = $Name.Normalize([System.Text.NormalizationForm]::FormD)
+  $id = [regex]::Replace($decomposed, '[\u0300-\u036f]', '').ToLowerInvariant()
+  $id = [regex]::Replace($id, '[^a-z0-9-]+', '-')
+  $id = [regex]::Replace($id, '-+', '-')
+  $id = $id.TrimStart('-')
+  if ($id.Length -gt 40) { $id = $id.Substring(0, 40) }
+  return $id.TrimEnd('-')
+}
+if ([string]::IsNullOrWhiteSpace($HostId)) {
+  $stationName = ''
+  try { $stationName = [System.Net.Dns]::GetHostName() } catch { $stationName = '' }
+  if ([string]::IsNullOrWhiteSpace($stationName)) { $stationName = [string]$env:COMPUTERNAME }
+  $HostId = ConvertTo-StationId -Name $stationName
+}
 
 $state = [ordered]@{
   BridgeTaskName = $BridgeTaskName
@@ -99,7 +131,7 @@ function Resolve-PowerShellExecutable {
 }
 
 function Get-RunnerCommand([string]$Mode, [string]$TaskArg) {
-  return @(
+  $command = @(
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
@@ -111,11 +143,13 @@ function Get-RunnerCommand([string]$Mode, [string]$TaskArg) {
     $Mode,
     '-TaskName',
     $TaskArg,
-    '-HostId',
-    $HostId,
     '-Root',
     $root
   )
+  if (-not [string]::IsNullOrWhiteSpace($script:DeclaredHostId)) {
+    $command += @('-HostId', $script:DeclaredHostId)
+  }
+  return $command
 }
 
 function Invoke-RunnerAsync([string]$Mode, [string]$TaskArg) {
@@ -133,7 +167,7 @@ function Get-TaskState {
     $taskState = 'Missing'
   }
   $isRunning = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match 'bridge\.js' -and $_.CommandLine -match [regex]::Escape($HostId) } |
+    Where-Object { $_.CommandLine -match 'bridge\.js' -and ($_.CommandLine -match [regex]::Escape($HostId) -or $_.CommandLine.ToLowerInvariant().Contains($root.ToLowerInvariant())) } |
     Measure-Object | Select-Object -ExpandProperty Count
   [PSCustomObject]@{
     task = $taskState
@@ -392,6 +426,211 @@ function Update-ConnectionStateFromLog {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Agent state (bridge-state.json, no secrets, readable by every user) and the
+# reader selector. The icon NEVER writes the configuration: a choice is a small
+# request in the ui folder, which the agent validates and applies. If that
+# folder is not writable the icon offers an explicit elevated retry.
+# ---------------------------------------------------------------------------
+function Read-BridgeStateFile {
+  $script:BridgeState = $null
+  $script:BridgeStateFresh = $false
+  if (-not (Test-Path -LiteralPath $stateFilePath)) { return }
+  try {
+    $parsed = [System.IO.File]::ReadAllText($stateFilePath).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $updated = [datetime]::Parse([string]$parsed.updated_at, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    $script:BridgeState = $parsed
+    $script:BridgeStateFresh = (((Get-Date).ToUniversalTime() - $updated).TotalSeconds -lt 20)
+    if ($parsed.host_id) { $script:HostId = [string]$parsed.host_id; $state.HostId = $script:HostId }
+  } catch {
+    Log-Text "No se pudo leer bridge-state.json: $($_.Exception.Message)"
+  }
+}
+
+function Get-ReaderLabel([string]$Code) {
+  switch ($Code) {
+    'waiting' { return 'esperando' }
+    'open' { return 'abierto' }
+    'failed' { return 'fallo' }
+    'disconnected' { return 'desconectado' }
+    'ambiguous' { return 'AMBIGUO' }
+    'pending' { return 'iniciando' }
+    default { return 'sin datos' }
+  }
+}
+
+function Get-ReaderSummary {
+  $summary = [PSCustomObject]@{ State = 'unknown'; Port = '-'; UsbId = '-'; Candidates = @(); HostState = 'ok' }
+  if (-not $script:BridgeState -or -not $script:BridgeStateFresh) { return $summary }
+  if ($script:BridgeState.host_state) { $summary.HostState = [string]$script:BridgeState.host_state }
+  $reader = @($script:BridgeState.readers)[0]
+  if (-not $reader) { return $summary }
+  $summary.State = [string]$reader.state
+  if ($reader.serial_port) { $summary.Port = [string]$reader.serial_port }
+  if ($reader.vendor_id -and $reader.product_id) { $summary.UsbId = ('{0}:{1}' -f $reader.vendor_id, $reader.product_id) }
+  if ($reader.candidates) { $summary.Candidates = @($reader.candidates) }
+  return $summary
+}
+
+function Get-ChoiceMessage([string]$Code) {
+  switch ($Code) {
+    'CHOICE_NOT_A_CANDIDATE' { return 'El dispositivo elegido ya no esta conectado. Abri "Elegir lector" de nuevo.' }
+    'CHOICE_NOT_IDENTIFIABLE' { return 'Hay dos dispositivos iguales sin numero de serie: no se pueden distinguir. Desenchufa el que no se use.' }
+    default { return 'La solicitud no era valida.' }
+  }
+}
+
+function Send-TrayReaderChoice {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet('select', 'forget')][string]$Action,
+    $Candidate
+  )
+
+  $nonce = [guid]::NewGuid().ToString('N')
+  $request = [ordered]@{
+    schema = 'session-hub-scanner-reader-choice/v1'
+    action = $Action
+    nonce = $nonce
+    requested_at = (Get-Date).ToString('o')
+  }
+  $usbId = ''
+  if ($Action -eq 'select') {
+    $serial = if ($Candidate.serial_number) { [string]$Candidate.serial_number } else { $null }
+    $request['device'] = [ordered]@{
+      vendor_id = [string]$Candidate.vendor_id
+      product_id = [string]$Candidate.product_id
+      serial_number = $serial
+    }
+    $usbId = ('{0}:{1}' -f $Candidate.vendor_id, $Candidate.product_id)
+    if ($serial) { $usbId += '/' + $serial }
+  }
+
+  try {
+    if (-not (Test-Path -LiteralPath $uiPath)) {
+      throw (New-Object System.IO.DirectoryNotFoundException('Falta la carpeta ui del agente'))
+    }
+    $final = Join-Path $uiPath 'reader-choice.request.json'
+    $temporary = $final + '.' + $nonce.Substring(0, 8) + '.tmp'
+    [System.IO.File]::WriteAllText($temporary, ($request | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $temporary -Destination $final -Force
+    $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
+    $notify.BalloonTipText = 'Solicitud enviada al agente; en unos segundos se aplica.'
+    $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+    $notify.ShowBalloonTip(2500)
+    Log-Text "Solicitud de lector enviada: $Action"
+  } catch {
+    Log-Text "No se pudo escribir la solicitud de lector: $($_.Exception.Message)"
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      "No se pudo enviar la eleccion del lector (permisos de la carpeta ui).`n`nSe puede repetir con permisos de administrador (aparece el aviso de Windows).`nSi no, un administrador puede fijarlo a mano con:`nrun-session-hub-bridge.ps1 -Mode choose-reader -ReaderUsbId $usbId`n`n¿Repetir como administrador ahora?",
+      'SessionHub Scanner Bridge', 'YesNo', 'Warning')
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+      $mode = if ($Action -eq 'select') { 'choose-reader' } else { 'forget-reader' }
+      $elevated = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $runnerScript + '"'), '-Mode', $mode, '-Root', ('"' + $root + '"'))
+      if ($usbId) { $elevated += @('-ReaderUsbId', $usbId) }
+      try {
+        Start-Process -FilePath (Resolve-PowerShellExecutable) -Verb RunAs -WindowStyle Hidden -ArgumentList $elevated | Out-Null
+      } catch {
+        Log-Text "Elevacion cancelada o fallida: $($_.Exception.Message)"
+      }
+    }
+  }
+}
+
+function Show-ReaderSelector {
+  if ($script:SelectorOpen) { return }
+  $summary = Get-ReaderSummary
+  $candidates = @($summary.Candidates)
+  if ($candidates.Count -eq 0) {
+    [System.Windows.Forms.MessageBox]::Show('No hay lectores USB conectados. Si el lector esta en modo teclado, escanea el codigo de configuracion que lo pasa a puerto serie (USB-VCOM).', 'SessionHub Scanner Bridge', 'OK', 'Information') | Out-Null
+    return
+  }
+  $script:SelectorOpen = $true
+  try {
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Elegir lector'
+    $dialog.StartPosition = 'CenterScreen'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $dialog.TopMost = $true
+    $dialog.ClientSize = New-Object System.Drawing.Size(520, 260)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = 'Hay mas de un dispositivo USB. Elegi cual es el lector de codigos (el puerto COM se muestra solo como referencia):'
+    $label.Location = New-Object System.Drawing.Point(12, 10)
+    $label.Size = New-Object System.Drawing.Size(496, 44)
+    $list = New-Object System.Windows.Forms.ListBox
+    $list.Location = New-Object System.Drawing.Point(12, 60)
+    $list.Size = New-Object System.Drawing.Size(496, 150)
+    foreach ($candidate in $candidates) {
+      $serialText = if ($candidate.serial_number) { $candidate.serial_number } else { 'sin numero de serie' }
+      $descText = if ($candidate.description) { $candidate.description } else { 'dispositivo serie USB' }
+      [void]$list.Items.Add(('{0}:{1} | {2} | {3} | puerto actual {4}' -f $candidate.vendor_id, $candidate.product_id, $serialText, $descText, $candidate.port))
+    }
+    if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = 'Elegir'
+    $ok.Location = New-Object System.Drawing.Point(342, 222)
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = 'Cancelar'
+    $cancel.Location = New-Object System.Drawing.Point(428, 222)
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dialog.AcceptButton = $ok
+    $dialog.CancelButton = $cancel
+    $dialog.Controls.AddRange(@($label, $list, $ok, $cancel))
+    $result = $dialog.ShowDialog()
+    $index = $list.SelectedIndex
+    $dialog.Dispose()
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $index -ge 0) {
+      Send-TrayReaderChoice -Action 'select' -Candidate $candidates[$index]
+    }
+  } finally {
+    $script:SelectorOpen = $false
+  }
+}
+
+# Visible reactions to the agent state: the choice dialog pops up once for each
+# distinct set of candidates (the menu stays available), a name conflict is
+# announced once, and the result of a choice is reported.
+function Update-ReaderAlerts {
+  $summary = Get-ReaderSummary
+  if ($summary.HostState -eq 'host_conflict' -and -not $script:ConflictShown) {
+    $script:ConflictShown = $true
+    $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
+    $notify.BalloonTipText = "Conflicto de nombre: otra instalacion usa el puesto $HostId. Resolve el nombre duplicado y reinicia el agente."
+    $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Error
+    $notify.ShowBalloonTip(6000)
+  }
+  if ($summary.State -eq 'ambiguous' -and $summary.HostState -eq 'ok') {
+    $signature = (($summary.Candidates | ForEach-Object { '{0}:{1}/{2}' -f $_.vendor_id, $_.product_id, $_.serial_number }) -join ',')
+    if ($signature -ne $script:SelectorSignature) {
+      $script:SelectorSignature = $signature
+      Show-ReaderSelector
+    }
+  } elseif ($summary.State -ne 'ambiguous') {
+    $script:SelectorSignature = ''
+  }
+  if ($script:BridgeStateFresh -and $script:BridgeState) {
+    $choice = $script:BridgeState.reader_choice
+    $nonce = if ($choice -and $choice.nonce) { [string]$choice.nonce } else { '' }
+    if (-not $script:SeenChoiceInitialized) {
+      $script:SeenChoiceInitialized = $true
+      $script:SeenChoiceNonce = $nonce
+    } elseif ($choice -and $nonce -ne $script:SeenChoiceNonce) {
+      $script:SeenChoiceNonce = $nonce
+      $notify.BalloonTipTitle = 'SessionHub Scanner Bridge'
+      if ([string]$choice.result -eq 'applied') {
+        $notify.BalloonTipText = 'Lector elegido: listo.'
+        $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+      } else {
+        $notify.BalloonTipText = (Get-ChoiceMessage -Code ([string]$choice.code))
+        $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Warning
+      }
+      $notify.ShowBalloonTip(5000)
+    }
+  }
+}
+
 # OTA: secret-free status written by the updater. Deferred installs/rollbacks
 # and the deferral alert are shown; nothing here changes the bridge.
 function Get-UpdateStatusLine {
@@ -415,13 +654,21 @@ function Build-StatusText {
   $updateLine = Get-UpdateStatusLine
   if ($updateLine) {
     $short = if ($updateLine.StartsWith('ALERTA')) { 'ALERTA upd' } else { 'Upd pendiente' }
-    return "$short | $conn | Host: $HostId"
+    return "$short | $conn | $HostId"
   }
-  $scanInfo = ''
-  if ($state.LastScan) {
-    $scanInfo = " | ULT: $($state.LastScanType) $($state.LastScan)"
+  $summary = Get-ReaderSummary
+  if ($summary.HostState -eq 'host_conflict') {
+    return "CONFLICTO de nombre: $HostId"
   }
-  return "Host: $HostId | Tarea: $($state.BridgeTaskName) | $conn$scanInfo"
+  if ($summary.HostState -eq 'superseded') {
+    return "Reemplazado por otra conexion: $HostId"
+  }
+  if ($summary.State -eq 'ambiguous') {
+    return "$HostId | hay mas de un lector: elegir"
+  }
+  $label = Get-ReaderLabel -Code $summary.State
+  $port = if ($summary.State -eq 'open' -and $summary.Port -ne '-') { " $($summary.Port)" } else { '' }
+  return "$HostId | lector: $label$port"
 }
 
 function New-QrTrayIcon {
@@ -490,7 +737,7 @@ Log-Text "Tray arranque. Host=$HostId Root=$root BridgeTask=$BridgeTaskName Poll
 Log-Text "NotifyIcon visible. UserInteractive=$([Environment]::UserInteractive)"
 try {
   $notify.BalloonTipTitle = 'Scanner host activo'
-  $notify.BalloonTipText = "Host $HostId listo"
+  $notify.BalloonTipText = "Puesto $HostId"
   $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
   $notify.ShowBalloonTip(2500)
 } catch {
@@ -519,11 +766,21 @@ $menuStop = New-Object System.Windows.Forms.ToolStripMenuItem 'Detener puente'
 $menuStart = New-Object System.Windows.Forms.ToolStripMenuItem 'Iniciar puente'
 $menuLogs = New-Object System.Windows.Forms.ToolStripMenuItem 'Abrir logs'
 $menuToggleCapture = New-Object System.Windows.Forms.ToolStripMenuItem 'Ver último escaneo'
+$menuChooseReader = New-Object System.Windows.Forms.ToolStripMenuItem 'Elegir lector...'
+$menuForgetReader = New-Object System.Windows.Forms.ToolStripMenuItem 'Olvidar lector recordado'
 $menuExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Salir'
 
 $menuStatus.Add_Click({
   Update-ConnectionStateFromLog
   [System.Windows.Forms.MessageBox]::Show((Get-StatusMessage), 'SessionHub Scanner Bridge', 'OK', 'Information') | Out-Null
+})
+$menuChooseReader.Add_Click({
+  Read-BridgeStateFile
+  Show-ReaderSelector
+})
+$menuForgetReader.Add_Click({
+  $answer = [System.Windows.Forms.MessageBox]::Show('Se olvida el lector recordado: el agente vuelve a detectar solo (si hay uno, lo toma; si hay mas de uno, pregunta). ¿Seguir?', 'SessionHub Scanner Bridge', 'YesNo', 'Question')
+  if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) { Send-TrayReaderChoice -Action 'forget' }
 })
 $menuRestart.Add_Click({
   Invoke-RunnerAsync -Mode stop-task -TaskArg $BridgeTaskName
@@ -561,7 +818,7 @@ $menuExit.Add_Click({
   [System.Windows.Forms.Application]::Exit()
 })
 
-$menu.Items.AddRange(@($menuStatus, $menuRestart, $menuStop, $menuStart, $menuLogs, $menuToggleCapture, $menuExit))
+$menu.Items.AddRange(@($menuStatus, $menuChooseReader, $menuForgetReader, $menuRestart, $menuStop, $menuStart, $menuLogs, $menuToggleCapture, $menuExit))
 $notify.ContextMenuStrip = $menu
 
 $form = New-Object System.Windows.Forms.Form
@@ -578,19 +835,30 @@ $timer.Interval = [Math]::Max(500, [int]$PollMs)
 
 function Get-StatusMessage {
   $taskState = Refresh-TaskState -Force
+  Read-BridgeStateFile
+  $summary = Get-ReaderSummary
   $errorLine = if ($state.LastError) { "`nError: $($state.LastError)" } else { '' }
   $readerLines = if ($state.ReaderStates.Count -gt 0) { ($state.ReaderStates.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key): $($_.Value.State) | $($_.Value.Port) | $($_.Value.Device) | ult=$($_.Value.LastScan)" }) -join "`n" } else { '(sin lectores seriales observados)' }
+  $hostLine = switch ($summary.HostState) {
+    'host_conflict' { 'CONFLICTO DE NOMBRE: otra instalacion usa este puesto; el agente no reintenta. Resolve el nombre duplicado y reinicia el agente.' }
+    'superseded' { 'Reemplazado: la misma instalacion abrio otra conexion; este proceso no reconecta.' }
+    default { 'normal' }
+  }
+  $candidateLines = if (@($summary.Candidates).Count -gt 0) { (@($summary.Candidates) | ForEach-Object { "  {0}:{1} serie={2} (puerto actual {3})" -f $_.vendor_id, $_.product_id, $(if ($_.serial_number) { $_.serial_number } else { '-' }), $_.port }) -join "`n" } else { '  (ninguno)' }
   return @"
 Estado tray del SessionHub Scanner Bridge
 
-Host: $HostId
+Puesto: $HostId
+Estado del puesto: $hostLine
+Lector: $(Get-ReaderLabel -Code $summary.State) | Puerto activo (referencia): $($summary.Port) | USB: $($summary.UsbId)
+Candidatos USB:
+$candidateLines
 Task: $($state.BridgeTaskName)
 TaskState: $($taskState.task)
 Running: $($taskState.running_count)
 Conexión: $([bool]$state.Connected)
-Puerto: $($state.LastSerialPort)
 Scanner: $($state.LastDevice)
-Lectores:
+Lectores (log):
 $readerLines
 Binding: $($state.BindingStatus) | Target: $($state.BindingTarget) | Owner: $($state.BindingOwner)
 Último scan: $($state.LastScan)
@@ -604,18 +872,25 @@ Actualizacion: $(Get-UpdateStatusLine)
 $timer.Add_Tick({
   try {
     Update-ConnectionStateFromLog
+    Read-BridgeStateFile
+    $readerSummary = Get-ReaderSummary
     if ($state.RecentScan -and $state.LastScanTs -and ((Get-Date) - $state.LastScanTs).TotalMilliseconds -lt $RecentScanMs) {
       $notify.Icon = $iconScan
     } else {
-      if (-not $state.Connected) {
-        $notify.Icon = $iconDisconnected
-      } elseif ($state.LastError) {
+      if ($readerSummary.HostState -ne 'ok') {
         $notify.Icon = $iconError
+      } elseif (-not $state.Connected) {
+        $notify.Icon = $iconDisconnected
+      } elseif ($state.LastError -or $readerSummary.State -eq 'failed') {
+        $notify.Icon = $iconError
+      } elseif (@('waiting', 'ambiguous', 'disconnected') -contains $readerSummary.State) {
+        $notify.Icon = $iconScan
       } else {
         $notify.Icon = $iconConnected
       }
       $state.RecentScan = $false
     }
+    Update-ReaderAlerts
 
     Set-NotifyTooltipText (Build-StatusText)
     $updateLine = Get-UpdateStatusLine
@@ -642,6 +917,7 @@ $timer.Add_Tick({
 
 try {
   $timer.Start()
+  Read-BridgeStateFile
   Update-ConnectionStateFromLog -ForceTaskState
   $notify.Icon = $iconDisconnected
   Set-NotifyTooltipText (Build-StatusText)

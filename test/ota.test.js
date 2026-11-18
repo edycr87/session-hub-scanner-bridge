@@ -356,7 +356,9 @@ test("PowerShell updater statement and policy stay in sync with the signer", () 
   const updaterProtected = Array.from(
     ps.match(/\$ProtectedNames = @\(([^)]*)\)/)[1].matchAll(/'([^']+)'/g),
   ).map((match) => match[1]);
+  // Strict parity: whatever the updater protects, the package builder refuses to ship.
   assert.deepEqual([...buildProtected].sort(), [...updaterProtected].sort());
+  for (const name of ["installation-id.json", "reader-identity.json", "ui"]) assert.ok(buildProtected.includes(name), name + " is not refused by the package builder");
 });
 
 test("installer preserves stored readers, secret and manifest URL on reinstall", () => {

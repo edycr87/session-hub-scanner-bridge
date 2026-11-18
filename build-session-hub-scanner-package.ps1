@@ -74,7 +74,7 @@ try {
 
   [System.IO.File]::WriteAllText($versionFile, $Version, (New-Object System.Text.UTF8Encoding($false)))
 
-  $protectedNames = @('scanner-bridge-config.json', 'installed-version.txt', 'bridge-state.json', 'update-drain.request', 'update-status.json', 'update.lock', '.ota', 'bridge.log', 'bridge.err', 'runner.log', 'tray.log', 'update.log')
+  $protectedNames = @('scanner-bridge-config.json', 'installed-version.txt', 'bridge-state.json', 'update-drain.request', 'update-status.json', 'update.lock', '.ota', 'bridge.log', 'bridge.err', 'runner.log', 'tray.log', 'update.log', 'reader-identity.json', 'installation-id.json', 'ui')
   foreach ($protected in $protectedNames) {
     if (Test-Path -LiteralPath (Join-Path $stagingRoot $protected)) {
       throw "El paquete no puede contener $protected (config/estado local de la PC)."

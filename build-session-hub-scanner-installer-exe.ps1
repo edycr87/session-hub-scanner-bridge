@@ -65,4 +65,5 @@ Write-Host ("  Ejecutable: {0}" -f $installerExe)
 Write-Host ("  Payload  : {0}" -f $payload)
 Write-Host ("  Version  : {0}" -f $packageVersion)
 Write-Host "Uso sugerido:"
-Write-Host "  $installerExe --host-id sucursal-1-caja-1 --serial-port COM6 --display-name 'Scanner Caja 1' --base-url https://devapp.dimensioncomercial.com.ar --manifest-url https://tu-servidor/scanner-host/manifest.json"
+Write-Host "  $installerExe --base-url <direccion-del-servidor> --manifest-url <direccion-del-manifest>"
+Write-Host "  (el nombre del puesto es el nombre de la PC y el lector se detecta solo; --keep-host-id, --host-id, --serial-port y --reader-usb-id son excepciones explicitas)"

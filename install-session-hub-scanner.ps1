@@ -1,9 +1,11 @@
 ﻿param(
   [Parameter(Position = 0)]
   [string]$HostId,
-  [string]$DisplayName = 'Scanner Caja 1',
-  [string]$BaseUrl = 'https://devapp.dimensioncomercial.com.ar',
-  [string]$SerialPort = 'COM6',
+  [string]$KeepHostId = '',
+  [string]$DisplayName = '',
+  [string]$BaseUrl = '',
+  [string]$SerialPort = '',
+  [string]$ReaderUsbId = '',
   [string]$ReaderDeviceId = '',
   [string]$ReadersJson = '',
   [string]$SharedSecret = '',
@@ -87,9 +89,11 @@ function Read-InstallerConfig {
   param(
     [string[]]$InputArgs,
     [string]$HostIdValue,
+    [string]$KeepHostIdValue,
     [string]$DisplayNameValue,
     [string]$BaseUrlValue,
     [string]$SerialPortValue,
+    [string]$ReaderUsbIdValue,
     [string]$ReaderDeviceIdValue,
     [string]$ReadersJsonValue,
     [string]$SharedSecretValue,
@@ -115,6 +119,8 @@ function Read-InstallerConfig {
 
   $parsed = Parse-InstallerArgs -InputArgs $InputArgs
   $boundHostId = if ($HostIdValue) { $HostIdValue } else { $null }
+  $boundKeepHostId = if ($KeepHostIdValue) { $KeepHostIdValue } else { $null }
+  $boundReaderUsbId = if ($ReaderUsbIdValue) { $ReaderUsbIdValue } else { $null }
   $boundDisplayName = if ($DisplayNameValue) { $DisplayNameValue } else { $null }
   $boundBaseUrl = if ($BaseUrlValue) { $BaseUrlValue } else { $null }
   $boundSerialPort = if ($SerialPortValue) { $SerialPortValue } else { $null }
@@ -142,9 +148,11 @@ function Read-InstallerConfig {
 
   $cfg = @{
     HostId = if ($boundHostId) { $boundHostId } else { $parsed['hostid'] }
-    DisplayName = if ($boundDisplayName) { $boundDisplayName } else { if ($parsed.ContainsKey('displayname')) { $parsed['displayname'] } else { 'Scanner Caja 1' } }
-    BaseUrl = if ($boundBaseUrl) { $boundBaseUrl } else { if ($parsed.ContainsKey('baseurl')) { $parsed['baseurl'] } else { 'https://devapp.dimensioncomercial.com.ar' } }
-    SerialPort = if ($boundSerialPort) { $boundSerialPort } else { if ($parsed.ContainsKey('serialport')) { $parsed['serialport'] } else { 'COM6' } }
+    KeepHostId = if ($boundKeepHostId) { $boundKeepHostId } else { if ($parsed.ContainsKey('keephostid')) { $parsed['keephostid'] } else { '' } }
+    DisplayName = if ($boundDisplayName) { $boundDisplayName } else { if ($parsed.ContainsKey('displayname')) { $parsed['displayname'] } else { '' } }
+    BaseUrl = if ($boundBaseUrl) { $boundBaseUrl } else { if ($parsed.ContainsKey('baseurl')) { $parsed['baseurl'] } else { '' } }
+    SerialPort = if ($boundSerialPort) { $boundSerialPort } else { if ($parsed.ContainsKey('serialport')) { $parsed['serialport'] } else { '' } }
+    ReaderUsbId = if ($boundReaderUsbId) { $boundReaderUsbId } else { if ($parsed.ContainsKey('readerusbid')) { $parsed['readerusbid'] } else { '' } }
     ReaderDeviceId = if ($boundReaderDeviceId) { $boundReaderDeviceId } else { if ($parsed.ContainsKey('readersdeviceid')) { $parsed['readersdeviceid'] } else { if ($parsed.ContainsKey('readerdeviceid')) { $parsed['readerdeviceid'] } else { '' } } }
     ReadersJson = if ($boundReadersJson) { $boundReadersJson } else { if ($parsed.ContainsKey('readersjson')) { $parsed['readersjson'] } else { '' } }
     SharedSecret = if ($boundSharedSecret) { $boundSharedSecret } else { if ($parsed.ContainsKey('sharedsecret')) { $parsed['sharedsecret'] } else { '' } }
@@ -168,10 +176,8 @@ function Read-InstallerConfig {
     StartUpdaterTask = if ($boundStartUpdaterTask) { $boundStartUpdaterTask } else { if ($parsed.ContainsKey('startupdatertask')) { $parsed['startupdatertask'] } else { 'true' } }
   }
 
-  if ([string]::IsNullOrWhiteSpace($cfg.HostId)) {
-    throw 'Falta HostId. Use -HostId <valor> o primer argumento sin guion.'
-  }
-
+  # No HostId is required: the station is named after the PC (see
+  # Resolve-StationIdentity). A name is explicit only with -KeepHostId/-HostId.
   $cfg.StartTask = if ([string]::IsNullOrWhiteSpace($cfg.StartTask)) { 'true' } else { $cfg.StartTask }
   $cfg.InstallUpdater = if ([string]::IsNullOrWhiteSpace($cfg.InstallUpdater)) { 'true' } else { $cfg.InstallUpdater }
   $cfg.StartUpdaterTask = if ([string]::IsNullOrWhiteSpace($cfg.StartUpdaterTask)) { 'true' } else { $cfg.StartUpdaterTask }
@@ -211,6 +217,76 @@ function Get-BridgePackageVersion {
   return '0.0.0'
 }
 
+# The station name is the hostname of the PC. Same rules as bridge.js
+# (normalizeHostId): lower case, no accents, [a-z0-9-], repeated '-' collapsed,
+# no '-' at the ends, at most 40 characters.
+function ConvertTo-StationId {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+  $decomposed = $Name.Normalize([System.Text.NormalizationForm]::FormD)
+  $id = [regex]::Replace($decomposed, '[\u0300-\u036f]', '').ToLowerInvariant()
+  $id = [regex]::Replace($id, '[^a-z0-9-]+', '-')
+  $id = [regex]::Replace($id, '-+', '-')
+  $id = $id.TrimStart('-')
+  if ($id.Length -gt 40) { $id = $id.Substring(0, 40) }
+  return $id.TrimEnd('-')
+}
+
+function Get-StationName {
+  $name = ''
+  try { $name = [System.Net.Dns]::GetHostName() } catch { $name = '' }
+  if ([string]::IsNullOrWhiteSpace($name)) { $name = [string]$env:COMPUTERNAME }
+  return ([string]$name).Trim()
+}
+
+# host_id = hostname normalized, display_name = hostname as is, in every
+# install (new or reinstall). A previous host_id is kept only with an explicit
+# -KeepHostId (or -HostId). There is no shared default: if nothing usable is
+# available the installer stops.
+function Resolve-StationIdentity {
+  param([Parameter(Mandatory = $true)][hashtable]$Cfg)
+
+  $stationName = Get-StationName
+  $explicit = ''
+  if (-not [string]::IsNullOrWhiteSpace($Cfg.KeepHostId)) {
+    $explicit = $Cfg.KeepHostId.Trim()
+  } elseif (-not [string]::IsNullOrWhiteSpace($Cfg.HostId)) {
+    $explicit = $Cfg.HostId.Trim()
+  }
+
+  if ($explicit) {
+    if ($explicit.Length -gt 80) {
+      throw 'El nombre de puesto explicito (-KeepHostId/-HostId) supera los 80 caracteres.'
+    }
+    $Cfg.HostId = $explicit
+    $Cfg.HostIdSource = 'explicit'
+  } else {
+    $derived = ConvertTo-StationId -Name $stationName
+    if ([string]::IsNullOrWhiteSpace($derived)) {
+      throw "No se pudo derivar el nombre del puesto del hostname de la PC ('$stationName'). No se instala. Use -KeepHostId <valor> para declarar un nombre."
+    }
+    $Cfg.HostId = $derived
+    $Cfg.HostIdSource = 'hostname'
+  }
+
+  # An explicit -DisplayName is baked into the tasks; otherwise the runner uses
+  # the current hostname on every start, so a renamed PC follows without reinstall.
+  $Cfg.DisplayNameExplicit = -not [string]::IsNullOrWhiteSpace($Cfg.DisplayName)
+  if (-not $Cfg.DisplayNameExplicit) {
+    $Cfg.DisplayName = if ($stationName) { $stationName } else { $Cfg.HostId }
+  }
+}
+
+function Assert-ServerAddress {
+  param([Parameter(Mandatory = $true)][hashtable]$Cfg)
+  if ([string]::IsNullOrWhiteSpace($Cfg.BaseUrl)) {
+    throw 'Falta -BaseUrl (direccion del servidor, por ejemplo https://servidor). No hay direccion por defecto: no se instala.'
+  }
+  if ($Cfg.BaseUrl -notmatch '^https?://[^/\s]+') {
+    throw "BaseUrl invalida ('$($Cfg.BaseUrl)'): debe empezar con http:// o https://."
+  }
+}
+
 # A reinstall (for example the manual bootstrap to the first OTA-capable
 # version) must not wipe local identity, readers or secrets that were not passed
 # again. Empty values inherit the stored ones; a value passed explicitly wins.
@@ -235,6 +311,8 @@ function Merge-PreservedConfig {
     SharedSecret = 'shared_secret'
     Symbology = 'symbology'
     ReaderDeviceId = 'reader_device_id'
+    ReaderUsbId = 'reader_usb_id'
+    BaseUrl = 'base_url'
     UpdateManifestUrl = 'update_manifest_url'
   }
   foreach ($key in $map.Keys) {
@@ -243,6 +321,12 @@ function Merge-PreservedConfig {
       $Cfg[$key] = [string]$storedValue
       Write-Host "Config preservada: $($map[$key])"
     }
+  }
+  # An explicit COM pin written by a 1.3.0 install is kept; a COM written by an
+  # older installer was a shared default (the very defect) and is never kept.
+  if ($stored.PSObject.Properties['host_id_source'] -and [string]::IsNullOrWhiteSpace($Cfg.SerialPort) -and -not [string]::IsNullOrWhiteSpace([string]$stored.serial_port)) {
+    $Cfg.SerialPort = [string]$stored.serial_port
+    Write-Host 'Config preservada: serial_port (fijado a mano)'
   }
   $script:PreservedOptionalConfig = @{}
   foreach ($optional in @('update_window', 'update_quiet_seconds')) {
@@ -279,6 +363,7 @@ function Invoke-InstallPreflight {
     install_root = $Cfg.InstallRoot
     host_id = $Cfg.HostId
     display_name = $Cfg.DisplayName
+    host_id_migration = $true
     base_url = $Cfg.BaseUrl
     serial_port = $Cfg.SerialPort
     reader_device_id = $Cfg.ReaderDeviceId
@@ -328,9 +413,11 @@ function Write-BridgeConfig {
     version = $Version
     updated_at = (Get-Date).ToString('o')
     host_id = $Cfg.HostId
+    host_id_source = $Cfg.HostIdSource
     display_name = $Cfg.DisplayName
     base_url = $Cfg.BaseUrl
     serial_port = $Cfg.SerialPort
+    reader_usb_id = $Cfg.ReaderUsbId
     reader_device_id = $Cfg.ReaderDeviceId
     readers_json = $Cfg.ReadersJson
     shared_secret = $Cfg.SharedSecret
@@ -360,6 +447,32 @@ function Write-BridgeConfig {
   $json = $payload | ConvertTo-Json -Depth 5
   Set-Content -Path $configPath -Value $json -Encoding UTF8
   Set-Content -Path $installedVersionPath -Value $Version -Encoding ASCII
+  Set-ConfigAccess -ConfigPath $configPath -InstallPath $InstallPath
+}
+
+# The config can hold the shared secret: only SYSTEM and Administrators may read
+# it (well-known SIDs, so it does not depend on the Windows language). The `ui`
+# folder is the one place ordinary users may write: the tray icon leaves reader
+# choices there and the agent validates them; the icon never writes the config.
+function Set-ConfigAccess {
+  param(
+    [Parameter(Mandatory = $true)][string]$ConfigPath,
+    [Parameter(Mandatory = $true)][string]$InstallPath
+  )
+
+  & icacls.exe $ConfigPath /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "No se pudo restringir el acceso a scanner-bridge-config.json (icacls codigo $LASTEXITCODE). Se detiene: el secreto no puede quedar legible por usuarios comunes."
+  }
+
+  $uiPath = Join-Path $InstallPath 'ui'
+  if (-not (Test-Path -LiteralPath $uiPath)) {
+    New-Item -ItemType Directory -Path $uiPath -Force | Out-Null
+  }
+  & icacls.exe $uiPath /grant '*S-1-5-32-545:(OI)(CI)(M)' | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "No se pudo dar acceso de escritura a la carpeta ui (icacls codigo $LASTEXITCODE). El icono pedira elevacion para elegir el lector."
+  }
 }
 
 function Install-TrayStartupLauncher {
@@ -379,8 +492,13 @@ function Install-TrayStartupLauncher {
   $launcherPath = Join-Path $startupDir 'SessionHubScannerBridgeTray.vbs'
   $powerShellExe = (Get-Command powershell).Source
   $trayScriptPath = Join-Path $Cfg.Root 'tray-session-hub-bridge.ps1'
-  $command = '"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File "{1}" -TaskName "{2}" -TrayTaskName "{3}" -HostId "{4}" -Root "{5}"' -f `
-    $powerShellExe, $trayScriptPath, $Cfg.TaskName, $Cfg.TrayTaskName, $Cfg.HostId, $Cfg.Root
+  $command = '"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File "{1}" -TaskName "{2}" -TrayTaskName "{3}" -Root "{4}"' -f `
+    $powerShellExe, $trayScriptPath, $Cfg.TaskName, $Cfg.TrayTaskName, $Cfg.Root
+  # The name is baked only when it was declared explicitly; otherwise the tray
+  # reads it from the agent state (hostname).
+  if (-not [string]::IsNullOrWhiteSpace($Cfg.HostId)) {
+    $command += (' -HostId "{0}"' -f $Cfg.HostId)
+  }
   $escapedCommand = $command.Replace('"', '""')
   $content = @(
     'Set shell = CreateObject("WScript.Shell")',
@@ -417,6 +535,7 @@ function Invoke-Runner {
   if ($Cfg.ContainsKey('BaseUrl') -and $Cfg.BaseUrl) { $argList += @('-BaseUrl', $Cfg.BaseUrl) }
   if ($Cfg.ContainsKey('SerialPort') -and $Cfg.SerialPort) { $argList += @('-SerialPort', $Cfg.SerialPort) }
   if ($Cfg.ContainsKey('ReaderDeviceId') -and $Cfg.ReaderDeviceId) { $argList += @('-ReaderDeviceId', $Cfg.ReaderDeviceId) }
+  if ($Cfg.ContainsKey('ReaderUsbId') -and $Cfg.ReaderUsbId) { $argList += @('-ReaderUsbId', $Cfg.ReaderUsbId) }
   if ($Cfg.ContainsKey('ReadersJson') -and $Cfg.ReadersJson) { $argList += @('-ReadersJson', $Cfg.ReadersJson) }
   if ($Cfg.ContainsKey('InputMode') -and $Cfg.InputMode) { $argList += @('-InputMode', $Cfg.InputMode) }
   if ($Cfg.ContainsKey('HeartbeatMs')) { $argList += @('-HeartbeatMs', [string]$Cfg.HeartbeatMs) }
@@ -429,9 +548,11 @@ function Invoke-Runner {
 
 $config = Read-InstallerConfig -InputArgs $args `
   -HostIdValue $HostId `
+  -KeepHostIdValue $KeepHostId `
   -DisplayNameValue $DisplayName `
   -BaseUrlValue $BaseUrl `
   -SerialPortValue $SerialPort `
+  -ReaderUsbIdValue $ReaderUsbId `
   -ReaderDeviceIdValue $ReaderDeviceId `
   -ReadersJsonValue $ReadersJson `
   -SharedSecretValue $SharedSecret `
@@ -463,6 +584,9 @@ if (-not (Test-Path $runner)) {
 # today (version, hashes, readers, manifest URL, tasks) is compared with what
 # this installer is about to write. Anything it would not keep fails closed.
 Merge-PreservedConfig -Cfg $config -InstallPath $config.InstallRoot
+Resolve-StationIdentity -Cfg $config
+Assert-ServerAddress -Cfg $config
+Write-Host "Puesto: $($config.HostId) (origen: $($config.HostIdSource)) | Nombre visible: $($config.DisplayName)"
 Invoke-InstallPreflight -Cfg $config
 
 try {
@@ -476,7 +600,6 @@ try {
 try {
   Invoke-Runner -Mode 'stop-task' -RunnerPath $runner -Cfg @{
     TaskName = $config.TaskName
-    HostId = $config.HostId
     Root = $config.InstallRoot
   }
 } catch {
@@ -504,7 +627,7 @@ if (-not (Test-Path $config.InstallRoot)) {
   New-Item -ItemType Directory -Path $config.InstallRoot -Force | Out-Null
 }
 
-$protectedInstallNames = @('scanner-bridge-config.json', 'installed-version.txt', 'bridge-state.json', 'update-drain.request', 'update-status.json', 'update.lock', '.ota')
+$protectedInstallNames = @('scanner-bridge-config.json', 'installed-version.txt', 'bridge-state.json', 'update-drain.request', 'update-status.json', 'update.lock', '.ota', 'reader-identity.json', 'installation-id.json', 'ui')
 Get-ChildItem -Path $PSScriptRoot -Force | Where-Object { $protectedInstallNames -notcontains $_.Name } | ForEach-Object {
   Copy-Item -Path $_.FullName -Destination $config.InstallRoot -Recurse -Force
 }
@@ -523,11 +646,14 @@ if ((Test-Path 'node.exe') -and (Test-Path 'bridge.js') -and (Test-Path 'node_mo
   throw "No se encontró runtime instalable en $($config.InstallRoot)"
 }
 
+# Only an explicit name or COM pin is baked into the scheduled tasks; the
+# hostname is computed again by the runner on every start.
 $cfgTask = @{
-  HostId = $config.HostId
-  DisplayName = $config.DisplayName
+  HostId = if ($config.HostIdSource -eq 'explicit') { $config.HostId } else { '' }
+  DisplayName = if ($config.DisplayNameExplicit) { $config.DisplayName } else { '' }
   BaseUrl = $config.BaseUrl
   SerialPort = $config.SerialPort
+  ReaderUsbId = $config.ReaderUsbId
   ReaderDeviceId = $config.ReaderDeviceId
   ReadersJson = $config.ReadersJson
   InputMode = 'serial'
@@ -571,7 +697,7 @@ if ($startTaskEnabled) {
 if ((Normalize-Boolean -Value $config.InstallTray) -and (Normalize-Boolean -Value $config.StartTrayTask) -and $startupLauncher) {
   & wscript.exe $startupLauncher
   Start-Sleep -Seconds 2
-  Invoke-Runner -Mode 'status-tray-task' -RunnerPath $runner -Cfg @{ TrayTaskName = $config.TrayTaskName; HostId = $config.HostId; Root = $config.InstallRoot }
+  Invoke-Runner -Mode 'status-tray-task' -RunnerPath $runner -Cfg @{ TrayTaskName = $config.TrayTaskName; Root = $config.InstallRoot }
 }
 
 $updaterScript = Join-Path $config.InstallRoot 'update-session-hub-scanner.ps1'
@@ -625,5 +751,6 @@ Write-Host "TrayTask: $($config.TrayTaskName)"
 Write-Host "UpdaterTask: $($config.UpdaterTaskName)"
 Write-Host "Version: $packageVersion"
 Write-Host "UpdateManifestUrl: $($config.UpdateManifestUrl)"
-Write-Host "HostId: $($config.HostId) | Puerto: $($config.SerialPort) | ReaderDeviceId: $($config.ReaderDeviceId)"
+$portSummary = if ([string]::IsNullOrWhiteSpace($config.SerialPort)) { '(deteccion automatica)' } else { $config.SerialPort }
+Write-Host "HostId: $($config.HostId) | Puerto: $portSummary | ReaderDeviceId: $($config.ReaderDeviceId) | ReaderUsbId: $($config.ReaderUsbId)"
 

@@ -411,3 +411,16 @@ test("delayed ACK after reconnect cannot consume a scan from the other reader", 
     await run.close();
   }
 });
+
+test("a reader pinned by COM keeps a logical reader_id that does not change with the port", async () => {
+  const run = await start({ legacy: true, legacyPort: "COM6", ports: [ports[0]] });
+  try {
+    run.emit("COM6", "PINNED\n");
+    await eventually(() => scans(run).length === 1, "pinned scan missing");
+    assert.equal(scans(run)[0].message.payload.reader_id, "reader-1");
+    assert.equal(scans(run)[0].message.payload.metadata.serial_port, "COM6");
+    ack(scans(run)[0]);
+  } finally {
+    await run.close();
+  }
+});
