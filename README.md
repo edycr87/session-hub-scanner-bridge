@@ -9,7 +9,58 @@ Objetivo:
 
 Canonical:
 - `C:\gestor_produccion\backend\tools\session-hub-scanner-bridge`
-- WS: `wss://devapp.dimensioncomercial.com.ar/session-hub/scanner`
+- WS: `wss://<servidor>/session-hub/scanner`. La dirección del servidor se declara siempre (`--base-url` / `-BaseUrl`); el agente y el instalador no traen ninguna por defecto.
+
+## Contrato del agente (versión 1.3.0)
+
+Este apartado es el contrato del agente. Lo que sigue describe lo que el código hace; si el código y este texto difieren, se corrige uno de los dos en el mismo cambio.
+
+### Identidad del puesto
+
+- `host_id` = nombre de la PC (hostname) normalizado: minúsculas, sin tildes, caracteres fuera de `[a-z0-9-]` pasan a `-`, los `-` repetidos se colapsan, sin `-` al inicio ni al final, máximo 40 caracteres. `display_name` = hostname tal cual.
+- Vale en toda instalación, nueva o reinstalación, y también en la PC que ya tenía una versión anterior. El instalador no pregunta el nombre. El runner lo vuelve a calcular en cada arranque: si se renombra la PC, el puesto cambia de nombre sin reinstalar.
+- No hay ningún valor compartido por defecto: ni `host_id`, ni nombre visible, ni puerto, ni dirección del servidor. Si falta la dirección del servidor, o el hostname no da un nombre válido, el instalador y el agente fallan con un mensaje claro y no instalan ni arrancan.
+- Conservar un `host_id` anterior es una decisión explícita: `-KeepHostId <valor>` en el instalador (`--keep-host-id` en el `.exe`). `-HostId <valor>` (o `--host-id`) también fija un nombre explícito. En ambos casos queda registrado en la configuración como `host_id_source = explicit`; sin eso el nombre sale siempre del hostname.
+- El servidor no renombra ni borra filas: el puesto anterior queda fuera de línea con su historial y el vínculo del puesto anterior no migra (se vuelve a escanear el QR).
+- Identificador de instalación: el agente genera una vez un identificador (`installation_id`, UUID) y lo guarda en `installation-id.json`; lo envía en `scanner.register`. Es un dato técnico, no una credencial. Si el servidor responde `scanner.registered` con `ok:false` y `error_code: SCANNER_HOST_ID_IN_USE` (otra instalación activa usa ese nombre), el agente informa el conflicto (estado `host_conflict`, visible en el ícono y en el log), cierra los lectores y NO reintenta: no hay bucle de reconexión. Si recibe `scanner.superseded` (la misma instalación abrió otra conexión) también deja de reconectar. Para salir del conflicto hay que resolver el nombre duplicado y reiniciar el agente.
+
+### Detección del lector
+
+- El lector se identifica por dispositivo, nunca por número de COM: `vendorId:productId` y, cuando el dispositivo lo informa, su número de serie. El `reader_id` que viaja al servidor es lógico y estable (`reader-1`, o el declarado) y no cambia con el puerto.
+- Detección automática (cuando no se fija ningún puerto ni lector): cada 3 segundos (configurable) lista los puertos y considera candidato sólo un puerto USB real (con `vendorId`), sin Bluetooth. Un dispositivo que no cumple se ignora.
+- Un candidato: lo abre y recuerda su identidad en `reader-identity.json` (`source: auto`).
+- Más de un candidato y ninguno recordado: estado `ambiguous`. El agente no elige, no abre ninguno y no toma "el primero". El ícono avisa y ofrece el selector (ver abajo). Dos dispositivos con el mismo `vendorId:productId` y sin número de serie no se pueden distinguir: tampoco se elige ninguno.
+- Con una identidad recordada o elegida: sólo se abre el puerto que coincide con ella. Si no está, el estado es `waiting` y se espera; nunca se toma otro dispositivo aunque sea el único. Si el lector aparece después del arranque, o desaparece y vuelve con otro número de COM (por ejemplo al pasar de teclado USB-HID a puerto serie USB-VCOM), el agente lo vuelve a abrir solo.
+- Si el lector abierto desaparece de la lista de puertos, el agente cierra el puerto y vuelve a esperar.
+- Fijarlo a mano: `-ReaderUsbId <vid:pid[/serie]>` en el instalador (se guarda como `reader_usb_id`), o `--reader-usb-id`; también la elección desde el ícono. `-SerialPort`/`--serial-port` sigue existiendo como fijación explícita por número de COM y no se usa salvo que se declare. `--readers` (varios lectores) conserva su comportamiento.
+
+### Más de un candidato: elegir
+
+- Estado `ambiguous`: el ícono muestra el aviso "Hay más de un lector USB: elegí cuál es" y el menú "Elegir lector..." lista cada candidato con VID:PID, número de serie si lo hay y el puerto actual sólo como referencia.
+- Al elegir, el ícono NO escribe la configuración: deja una solicitud en la carpeta `ui` (la única que los usuarios comunes pueden escribir) y el agente la valida contra los candidatos que ve en ese momento, guarda la elección por identidad en `reader-identity.json` (`source: user`) y abre ese dispositivo. Después de reiniciar recuerda la elección. "Olvidar lector" borra la identidad guardada.
+- Si no se puede escribir en `ui` (instalación anterior sin esa carpeta), el ícono ofrece repetir la acción con elevación explícita (administrador). El mensaje de error nunca es un callejón sin salida: dice qué hacer.
+
+### Qué se guarda y dónde (`C:\ProgramData\SessionHubScannerBridge`)
+
+| Archivo | Quién lo escribe | Contenido | Acceso de usuarios comunes |
+|---|---|---|---|
+| `scanner-bridge-config.json` | instalador (administrador) | configuración, incluido el secreto si existe | sin acceso (sólo SYSTEM y Administradores) |
+| `reader-identity.json` | agente (SYSTEM) | lector recordado o elegido (VID:PID, serie), no es secreto | lectura |
+| `installation-id.json` | agente (SYSTEM) | identificador de instalación, no es secreto | lectura |
+| `bridge-state.json` | agente (SYSTEM) | estado del puesto y del lector, candidatos | lectura |
+| `ui\reader-choice.request.json` | ícono o administrador | solicitud de elegir u olvidar el lector | escritura (carpeta `ui`) |
+
+`reader-identity.json` e `installation-id.json` no viajan en los paquetes y la actualización automática no los toca.
+
+### Estado visible
+
+- El ícono muestra: puesto (hostname), estado del lector (`waiting` esperando, `open` abierto, `failed` falló, `disconnected` desconectado, `ambiguous` ambiguo) o conflicto de nombre (`host_conflict`), y el puerto activo como referencia.
+- El mismo estado viaja al servidor: en `scanner.register` y en cada `scanner.heartbeat`, dentro de `capabilities.readers` (lista con `reader_id`, `state`, `serial_port`, `vendor_id`, `product_id`, número de serie si lo hay y, si es ambiguo, los candidatos). El servidor no lo exige.
+
+### Instalación y reinstalación
+
+- El diagnóstico previo ya no bloquea una reinstalación porque cambien nombre de puesto, nombre visible o puerto: lo declara como migración intencional (aviso con valor viejo y nuevo). Un cambio de dirección del servidor sigue bloqueando. Un `bridge.js` instalado que no corresponde a ningún Source versionado sigue bloqueando (`UNKNOWN_BRIDGE_SOURCE`): no se acredita agregando su hash; el camino es el manual explícito (copia de respaldo y reinstalación con `-AcknowledgeDiagnosticDrop` tras leer el informe, o el procedimiento que apruebe quien revisa).
+- Esta versión no incluye claves, canales ni secretos en el paquete. El secreto compartido, si el servidor lo exige, se entrega aparte y se pasa en la instalación.
 
 ## Requisitos
 
@@ -28,10 +79,13 @@ npm ci
 ## Variables y parámetros soportados
 
 - `SESSION_HUB_BASE_URL` / `--base-url`
-- `SESSION_HUB_SCANNER_HOST_ID` / `--host-id`
-- `SESSION_HUB_SCANNER_DISPLAY_NAME` / `--display-name`
+- `SESSION_HUB_SCANNER_HOST_ID` / `--host-id` (sin él: hostname normalizado)
+- `SESSION_HUB_SCANNER_DISPLAY_NAME` / `--display-name` (sin él: hostname)
 - `SESSION_HUB_SCANNER_INPUT_MODE` / `--input-mode` (`serial` o `stdin`, default `stdin`)
-- `SESSION_HUB_SCANNER_SERIAL_PORT` / `--serial-port`
+- `SESSION_HUB_SCANNER_SERIAL_PORT` / `--serial-port` (fijación explícita por COM; sin él, detección automática)
+- `SESSION_HUB_SCANNER_READER_USB_ID` / `--reader-usb-id` (fija el lector por `vid:pid[/serie]`)
+- `SESSION_HUB_SCANNER_AUTO_POLL_MS` / `--auto-poll-ms` (default 3000)
+- `SESSION_HUB_SCANNER_IDENTITY_FILE` / `--identity-file`, `SESSION_HUB_SCANNER_INSTALLATION_FILE` / `--installation-file`, `SESSION_HUB_SCANNER_UI_DIR` / `--ui-dir`
 - `SESSION_HUB_SCANNER_SERIAL_BAUD_RATE` / `--serial-baud-rate`
 - `SESSION_HUB_SCANNER_SERIAL_WAIT_MS` / `--serial-wait-ms`
 - `SESSION_HUB_SCANNER_SERIAL_FALLBACK_TO_STDIN` / `--serial-fallback`
@@ -41,41 +95,28 @@ npm ci
 - `SESSION_HUB_SCANNER_DEFAULT_SYMBOLOGY` / `--symbology`
 - `SESSION_HUB_SCANNER_SHARED_SECRET` / `--shared-secret`
 
-## Identificar y fijar cada lector por `reader_id`
+## Identificar y fijar el lector
 
-Para evitar choques con varios lectores instalados:
+En el uso normal no hace falta hacer nada: el agente detecta el lector solo (ver "Detección del lector"). Para fijarlo a mano:
 
-1. Descubrí los puertos disponibles con ID de dispositivo:
+1. Con el agente en marcha, `bridge-state.json` lista los candidatos (`vendor_id`, `product_id`, `serial_number`, puerto) y el menú del ícono "Elegir lector..." permite elegir.
+2. O declará el dispositivo en la instalación: `-ReaderUsbId 0c2e:0b61` (o `0c2e:0b61/NUMERODESERIE`).
+3. `discover-session-hub-readers.ps1` queda sólo como ayuda histórica; no participa de la detección.
 
-```powershell
-Set-Location C:\gestor_produccion\backend\tools\session-hub-scanner-bridge
-.\discover-session-hub-readers.ps1
-```
+## Configuración mínima para un puesto
 
-2. Copiá el `device_id` que te interesa y usalo:
-- env var: `SESSION_HUB_SCANNER_DEVICE_ID=...`
-- o parámetro: `--scanner-device-id ...`
-
-## Configuración objetivo para el host
-
+- `SESSION_HUB_BASE_URL=https://<servidor>` (obligatoria)
 - `SESSION_HUB_SCANNER_INPUT_MODE=serial`
-- `SESSION_HUB_SCANNER_SERIAL_PORT=COM6`
 - `SESSION_HUB_SCANNER_SERIAL_BAUD_RATE=9600`
-- `SESSION_HUB_BASE_URL=https://devapp.dimensioncomercial.com.ar`
-- `SESSION_HUB_SCANNER_HOST_ID=sucursal-1-caja-1`
-- `SESSION_HUB_SCANNER_DISPLAY_NAME=Scanner Caja 1`
-- `SESSION_HUB_SCANNER_DEVICE_ID=<id-del-lector>` opcional pero recomendado
+- `SESSION_HUB_SCANNER_HOST_ID` y `SESSION_HUB_SCANNER_DISPLAY_NAME`: sólo si se quiere un nombre distinto del hostname
+- `SESSION_HUB_SCANNER_SERIAL_PORT` y `SESSION_HUB_SCANNER_DEVICE_ID`: sólo para fijar a mano; sin ellos se detecta automáticamente
 
 ## Ejecución directa (modo desarrollo)
 
 ```powershell
 Set-Location C:\gestor_produccion\backend\tools\session-hub-scanner-bridge
-$env:SESSION_HUB_BASE_URL="https://devapp.dimensioncomercial.com.ar"
-$env:SESSION_HUB_SCANNER_HOST_ID="sucursal-1-caja-1"
-$env:SESSION_HUB_SCANNER_DISPLAY_NAME="Scanner Caja 1"
+$env:SESSION_HUB_BASE_URL="https://<servidor>"
 $env:SESSION_HUB_SCANNER_INPUT_MODE="serial"
-$env:SESSION_HUB_SCANNER_SERIAL_PORT="COM6"
-$env:SESSION_HUB_SCANNER_DEVICE_ID="USB\\VID_0A5F&PID_8000\\0123456789"
 node bridge.js
 ```
 
@@ -112,7 +153,7 @@ Script: `run-session-hub-bridge.ps1`
 
 ```powershell
 # Desde C:\gestor_produccion\backend\tools\session-hub-scanner-bridge
-.\run-session-hub-bridge.ps1 -Mode install-task -ReaderDeviceId "USB\\VID_0A5F&PID_8000\\0123456789"
+.\run-session-hub-bridge.ps1 -Mode install-task -BaseUrl "https://<servidor>"
 .\run-session-hub-bridge.ps1 -Mode start-task
 .\run-session-hub-bridge.ps1 -Mode status-task
 .\run-session-hub-bridge.ps1 -Mode tail-logs -TailLines 300
@@ -142,13 +183,15 @@ Install en máquina destino:
 ```powershell
 Expand-Archive -Path "C:\tmp\session-hub-scanner-bridge.zip" -DestinationPath "C:\tmp\session-hub-scanner-bridge-package" -Force
 Set-Location C:\tmp\session-hub-scanner-bridge-package\session-hub-scanner-bridge
-.\install-session-hub-scanner.ps1 -HostId "sucursal-1-caja-1" -DisplayName "Scanner Caja 1" -SerialPort "COM6" -ReaderDeviceId "USB\\VID_0A5F&PID_8000\\0123456789"
+.\install-session-hub-scanner.ps1 -BaseUrl "https://<servidor>"
 ```
+
+Sin más parámetros: el nombre del puesto es el hostname de la PC y el lector se detecta solo. En una reinstalación que debe conservar el nombre anterior: `-KeepHostId <nombre-anterior>`.
 
 Recomendado, con tray visible, autoarranque y updater:
 
 ```powershell
-.\install-session-hub-scanner.ps1 -HostId "sucursal-1-caja-1" -DisplayName "Scanner Caja 1" -SerialPort "COM6" -ReaderDeviceId "USB\\VID_0A5F&PID_8000\\0123456789" -InstallTray true -StartTrayTask true -InstallUpdater true -StartUpdaterTask true -UpdateManifestUrl "https://tu-servidor/scanner-host/manifest.json" -UpdateChannel stable
+.\install-session-hub-scanner.ps1 -BaseUrl "https://<servidor>" -InstallTray true -StartTrayTask true -InstallUpdater true -StartUpdaterTask true -UpdateManifestUrl "https://tu-servidor/scanner-host/manifest.json" -UpdateChannel stable
 ```
 
 ## Tray icon (estado en barra de sistema)
@@ -160,7 +203,7 @@ Comandos:
 ```powershell
 Set-Location C:\ProgramData\SessionHubScannerBridge
 .\run-session-hub-bridge.ps1 -Mode install-tray-task -Root C:\ProgramData\SessionHubScannerBridge
-.\run-session-hub-bridge.ps1 -Mode start-tray-task -Root C:\ProgramData\SessionHubScannerBridge -TrayTaskName SessionHubScannerBridgeTray -TaskName SessionHubScannerBridge -HostId sucursal-1-caja-1
+.\run-session-hub-bridge.ps1 -Mode start-tray-task -Root C:\ProgramData\SessionHubScannerBridge -TrayTaskName SessionHubScannerBridgeTray -TaskName SessionHubScannerBridge
 .\run-session-hub-bridge.ps1 -Mode status-tray-task -TrayTaskName SessionHubScannerBridgeTray
 ```
 
@@ -237,10 +280,7 @@ Uso:
 
 ```powershell
 & 'C:\tmp\SessionHubScannerBridgeInstaller\SessionHubScannerBridgeInstaller.exe' \
-  --host-id sucursal-1-caja-1 \
-  --display-name "Scanner Caja 1" \
-  --serial-port COM6 \
-  --base-url https://devapp.dimensioncomercial.com.ar \
+  --base-url https://<servidor> \
   --manifest-url https://tu-servidor/scanner-host/manifest.json \
   --update-channel stable \
   --task-name SessionHubScannerBridge \
@@ -263,8 +303,8 @@ El bridge soporta un proceso, un `host_id` y un binding compartido con varios le
 Identificá los dispositivos con `./discover-session-hub-readers.ps1` y conservá una sola instalación/task. Ejemplo:
 
 ```powershell
-$readers = '[{"reader_id":"caja-izquierda","serial_port":"COM6","scanner_device_id":"USB-READER-LEFT","serial_baud_rate":9600},{"reader_id":"caja-derecha","serial_port":"COM7","scanner_device_id":"USB-READER-RIGHT","serial_baud_rate":9600}]'
-.\install-session-hub-scanner.ps1 -HostId "sucursal-1-caja-1" -ReadersJson $readers
+$readers = '[{"reader_id":"caja-izquierda","scanner_device_id":"USB-READER-LEFT","serial_baud_rate":9600},{"reader_id":"caja-derecha","scanner_device_id":"USB-READER-RIGHT","serial_baud_rate":9600}]'
+.\install-session-hub-scanner.ps1 -BaseUrl "https://<servidor>" -ReadersJson $readers
 ```
 
 El instalador persiste `readers_json` en `scanner-bridge-config.json`. El runner lo carga en cada arranque, por lo que el Scheduled Task único y las actualizaciones conservan la configuración. El instalador `.exe` acepta el mismo JSON con `--readers`.
@@ -283,6 +323,9 @@ Este paquete produce IDs estables y atribución por lector, pero no demuestra id
 
 ## Troubleshooting
 
-- `serial.reader.failed`: confirmar COM e identidad exacta; el lector queda fail-closed.
+- `serial.reader.failed`: con lector fijado, confirmar COM e identidad exacta (queda fail-closed); en detección automática, el agente reintenta solo en cada ciclo.
+- Estado `ambiguous`: hay más de un lector USB; elegir desde el ícono o desenchufar el que no se use.
+- Estado `host_conflict`: otra instalación usa el mismo nombre de puesto; resolver el nombre duplicado y reiniciar el agente.
+- Estado `waiting`: no hay lector USB (o el recordado no está conectado); si el lector está en modo teclado, escanear el código de configuración que lo pasa a puerto serie.
 - `scanner.ack.unsupported_missing_scan_id`: backend anterior al ACK contractual; no habrá falso ACK.
 - La bandeja muestra el último scan/puerto y los logs siguen en `bridge.log` y `bridge.err`.
