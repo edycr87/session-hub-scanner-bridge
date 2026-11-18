@@ -257,12 +257,14 @@ test("dormant Caja2 and Caja3 preserve independent config/state and block consol
 
 test("current reviewed bridge hash is recognized; missing COM does not diagnose hardware failure", () => {
   const installed = targetRoot([value("input_mode", "keyboard"), value("serial_port", "COM6")]);
-  // The 1.2.0 reviewed Source hash. The 1.3.0 bridge.js is not in the allowlist
-  // until a reviewed release change adds it with its evidence of origin.
-  installed.files[0].sha256 = "80eb700fa6d9625c63541b9cf8f0a925f03727e58b054c0e3699865877f7cdb0";
+  // The hash is COMPUTED from the bridge.js of this tree: every version must be listed
+  // (with its origin) by a reviewed change, or this test fails.
+  const bridgeHash = require("node:crypto").createHash("sha256").update(fs.readFileSync(path.join(root, "bridge.js"))).digest("hex");
+  assert.ok(Object.prototype.hasOwnProperty.call(diag.KNOWN_BRIDGE_SOURCES, bridgeHash), "bridge.js " + bridgeHash + " is not in KNOWN_BRIDGE_SOURCES");
+  installed.files[0].sha256 = bridgeHash;
   const result = diag.evaluate(facts({ roots: [installed], serial_ports: [] }), { context: "ota" });
   assert.equal(result.verdict, "PASS");
-  assert.ok(result.identified[0].source.includes("1.2.0"));
+  assert.ok(result.identified[0].source.includes("1.3.0"));
 });
 
 test("unattributable scanner tasks block before any task overwrite", () => {

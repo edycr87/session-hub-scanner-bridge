@@ -110,6 +110,8 @@ const TASK_ARG_TO_KEY = {
 // Identification only (sha256 of bridge.js, raw and LF-normalized are both
 // checked). Unknown hashes are reported, never guessed.
 const KNOWN_BRIDGE_SOURCES = {
+  "d4e4af390f5d411bcf16b8261997cd5ebc76ab1b3a083ec6390287dc0a914276":
+    "session-hub-scanner-bridge 1.3.0 reviewed Source (this repository, publish/scanner_hostname_autodetect_v60)",
   "80eb700fa6d9625c63541b9cf8f0a925f03727e58b054c0e3699865877f7cdb0": "session-hub-scanner-bridge 1.2.0 reviewed OTA Source",
   "26f60f99a642049b117b2c1d305a506c0e2b2e2a3cb763f5373c1e25404c84ff":
     "session-hub-scanner-bridge 92e15d8 (main, 2026-04-03)",
