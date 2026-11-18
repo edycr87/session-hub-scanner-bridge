@@ -181,7 +181,7 @@ test("a bridge without base-url fails with a clear message instead of assuming a
 
 test("no shared default host id, display name, serial port or server address in the bridge", () => {
   const text = fs.readFileSync(bridge, "utf8");
-  for (const forbidden of ["sucursal-1-caja-1", "Scanner Caja 1", "COM6", "devapp", "dimensioncomercial"])
+  for (const forbidden of ["sucursal-1-caja", "Scanner Caja", "COM6", "devapp", "dimensioncomercial"])
     assert.equal(text.includes(forbidden), false, "bridge.js still carries " + forbidden);
 });
 
@@ -332,6 +332,51 @@ test("temporary MOBILE_CLIENT_NOT_CONNECTED still retries the same scan_id", asy
     run.child.stdin.write(":scan 456\n");
     await eventually(() => run.scans().length >= 2, "temporary rejection was not retried", 200);
     assert.equal(run.scans()[0].message.payload.scan_id, run.scans()[1].message.payload.scan_id);
+  } finally {
+    await run.stop();
+  }
+});
+
+test("an empty --host-id (a flag with no value) is a clear error, never the name \"true\"", async () => {
+  for (const args of [["--host-id", "--display-name", "x"], ["--host-id"]]) {
+    const child = fork(bridge, ["--base-url", "http://127.0.0.1:9", "--input-mode", "serial", ...args], {
+      cwd: root,
+      silent: true,
+      env: { ...process.env, SESSION_HUB_SCANNER_HOSTNAME: "pc-1", SESSION_HUB_SERIALPORT_MODULE: fake },
+    });
+    let stderr = "";
+    let stdout = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
+    const code = await new Promise((resolve) => {
+      child.on("exit", resolve);
+      setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve("kept running with the name true");
+      }, 4000);
+    });
+    assert.equal(typeof code, "number", String(code));
+    assert.notEqual(code, 0);
+    assert.match(stderr, /--host-id needs a value/);
+    assert.equal(stdout.includes('"host_id":"true"'), false);
+  }
+});
+
+test("the server's heartbeat acknowledgement (no scan_id) is not logged as an error", async () => {
+  const run = await start({
+    hostname: "pc-hb",
+    onMessage({ socket, message }) {
+      if (message.type === "scanner.register") socket.send(JSON.stringify({ type: "scanner.registered", payload: { ok: true } }));
+      if (message.type === "scanner.heartbeat") socket.send(JSON.stringify({ type: "scanner.ack", payload: { ok: true, kind: "heartbeat" } }));
+    },
+  });
+  try {
+    await eventually(() => run.messages.filter((entry) => entry.message.type === "scanner.heartbeat").length >= 3, "no heartbeats", 200);
+    await sleep(100);
+    assert.equal(run.logs.some((line) => line.status === "scanner.ack.unsupported_missing_scan_id"), false);
+    // an ack without scan_id that is NOT a heartbeat is still reported
+    run.connections[0].send(JSON.stringify({ type: "scanner.ack", payload: { ok: true } }));
+    await eventually(() => run.logs.some((line) => line.status === "scanner.ack.unsupported_missing_scan_id"), "other scan-less acks must still be reported");
   } finally {
     await run.stop();
   }

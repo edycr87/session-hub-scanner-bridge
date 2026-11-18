@@ -433,3 +433,41 @@ test("a configured COM that does not exist still fails closed for an explicit pi
     await run.stop();
   }
 });
+
+test("an icon request can never change the station name or anything but the reader (host_id lock)", async () => {
+  const run = await start({ ports: [usb("COM3", { serialNumber: "SN-A" }), usb("COM4", { serialNumber: "SN-B" })] });
+  try {
+    await eventually(() => run.readerState() === "ambiguous", "not ambiguous");
+    const hostBefore = run.state().host_id;
+    assert.equal(hostBefore, "test-host");
+    const evil = {
+      schema: "session-hub-scanner-reader-choice/v1",
+      action: "select",
+      nonce: "evil1",
+      host_id: "otro-puesto",
+      display_name: "Otro",
+      base_url: "http://127.0.0.1:1",
+      device: { vendor_id: "0c2e", product_id: "0b61", serial_number: "SN-B", host_id: "otro-puesto" },
+    };
+    fs.writeFileSync(path.join(run.uiDir, "reader-choice.request.json"), JSON.stringify(evil));
+    await eventually(() => run.opened().includes("COM4"), "the valid part of the request (the reader) was not applied");
+    // the request may choose the reader, nothing else: station name unchanged in state, heartbeats and identity
+    await sleep(1300);
+    assert.equal(run.state().host_id, hostBefore);
+    assert.equal(run.state().display_name === "Otro", false);
+    const beats = run.messages.filter((entry) => entry.message.type === "scanner.heartbeat");
+    assert.ok(beats.length > 0);
+    assert.ok(beats.every((entry) => entry.message.payload.host_id === hostBefore), "a heartbeat carries another host_id");
+    assert.equal(JSON.stringify(run.identity()).includes("otro-puesto"), false);
+    // forget requests with extra fields change nothing either
+    fs.writeFileSync(
+      path.join(run.uiDir, "reader-choice.request.json"),
+      JSON.stringify({ schema: "session-hub-scanner-reader-choice/v1", action: "forget", nonce: "evil2", host_id: "otro-puesto" }),
+    );
+    await eventually(() => run.identity() === null, "forget not applied");
+    await sleep(1300);
+    assert.equal(run.state().host_id, hostBefore);
+  } finally {
+    await run.stop();
+  }
+});

@@ -10,6 +10,10 @@ function log(label, payload) {
     JSON.stringify({ label, ts: new Date().toISOString(), ...(payload || {}) }),
   );
 }
+// Flags given with no value (`--host-id` followed by another flag, or at the
+// end) become "true" in `out`; `bareFlags` remembers them so that a name can
+// never silently be the text "true".
+const bareFlags = new Set();
 function argsOf(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -20,7 +24,10 @@ function argsOf(argv) {
     else if (argv[i + 1] && !argv[i + 1].startsWith("--")) {
       out[key] = argv[i + 1];
       i += 1;
-    } else out[key] = "true";
+    } else {
+      out[key] = "true";
+      bareFlags.add(key);
+    }
   }
   return out;
 }
@@ -382,6 +389,9 @@ if (readersRaw) {
     };
   });
 } else readerConfig = [legacy];
+for (const key of ["host-id", "display-name", "base-url"])
+  if (bareFlags.has(key))
+    throw new Error("--" + key + " needs a value (it was given empty)");
 const requestedInputMode = String(
   first(raw["input-mode"], process.env.SESSION_HUB_SCANNER_INPUT_MODE, "stdin"),
 ).toLowerCase();
@@ -892,6 +902,9 @@ function ack(payload) {
   const id =
     payload && (payload.scan_id || (payload.data && payload.data.scan_id));
   if (!id) {
+    // The server acknowledges every heartbeat with a scan-less ack: not an error.
+    const kind = String((payload && (payload.kind || payload.ack_kind)) || "");
+    if (kind === "heartbeat") return;
     log("bridge.error", { status: "scanner.ack.unsupported_missing_scan_id" });
     return;
   }

@@ -530,6 +530,10 @@ function Start-Bridge {
     Remove-Item -LiteralPath $staleDrain -Force -ErrorAction SilentlyContinue
     Trace-Runner 'Removed stale update-drain.request before start.'
   }
+  if ([string]::IsNullOrWhiteSpace($HostId)) {
+    Trace-Runner 'Start-Bridge refused: the hostname does not give a valid station name and none was declared.'
+    throw 'El nombre de la PC no da un nombre de puesto valido y no se declaro uno (-HostId). No se arranca.'
+  }
   if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
     Trace-Runner 'Start-Bridge refused: no BaseUrl (not on the command line and not in scanner-bridge-config.json).'
     throw 'Falta la direccion del servidor (BaseUrl). No hay direccion por defecto: no se arranca.'

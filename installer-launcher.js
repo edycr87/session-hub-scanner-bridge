@@ -85,6 +85,22 @@ function addPowerShellBoolArg(output, key, value) {
   output.push(value ? "1" : "0");
 }
 
+// Reads only the saved server address of a previous installation. Nothing else
+// from the (private) configuration is read, kept or passed along.
+function storedBaseUrl(installRoot) {
+  try {
+    const text = fs
+      .readFileSync(path.join(installRoot, "scanner-bridge-config.json"), "utf8")
+      .replace(/^\uFEFF/, "");
+    const value = JSON.parse(text).base_url;
+    return typeof value === "string" && /^https?:\/\/\S+/.test(value.trim())
+      ? value.trim()
+      : "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function main() {
   const installerScript = resolveInstallerScript();
   if (!installerScript) {
@@ -108,13 +124,18 @@ function main() {
     installerScript,
   ];
 
-  // No shared defaults: the server address is mandatory, the station name is
-  // the hostname (decided by the installer) unless one is declared explicitly,
-  // and the reader is detected automatically unless it is pinned explicitly.
-  const baseUrl = args["base-url"] || args.baseurl || "";
+  // No shared defaults. The server address is the one given with --base-url or,
+  // in a reinstall, the one explicitly saved by the previous installation (the
+  // same rule as the .ps1 installer). With neither, it stops with a clear error.
+  const installRoot =
+    args["install-root"] ||
+    args.installroot ||
+    `${process.env.ProgramData || ""}\\SessionHubScannerBridge`;
+  const baseUrl =
+    args["base-url"] || args.baseurl || storedBaseUrl(installRoot) || "";
   if (!`${baseUrl}`.trim()) {
     console.error(
-      "Falta --base-url (direccion del servidor). No hay direccion por defecto: no se instala.",
+      "Falta --base-url (direccion del servidor) y no hay una direccion guardada en una instalacion anterior. No hay direccion por defecto: no se instala.",
     );
     process.exit(1);
   }

@@ -15,8 +15,8 @@ function plannedDefaults(overrides = {}) {
   return {
     input_mode: "serial",
     install_root: TARGET,
-    host_id: "sucursal-1-caja-1",
-    display_name: "Scanner Caja 1",
+    host_id: "puesto-anterior-1",
+    display_name: "Puesto Anterior 1",
     base_url: "https://devapp.dimensioncomercial.com.ar",
     serial_port: "COM6",
     reader_device_id: "",
@@ -66,7 +66,7 @@ const codes = (result) => result.blockers.map((item) => item.code).sort();
 
 test("installed config identical to the planned values passes", () => {
   const keys = [
-    value("host_id", "sucursal-1-caja-1"),
+    value("host_id", "puesto-anterior-1"),
     value("serial_port", "COM6"),
     value("base_url", "https://devapp.dimensioncomercial.com.ar/"),
     value("install_tray", "True"),
@@ -317,8 +317,8 @@ test("Windows collector blocks unknown Source in three dormant roots and preserv
 
 // ---- 1.3.0: station name, display name and COM port are migrations, not blockers ----
 const oldInstall = () => [
-  value("host_id", "sucursal-1-caja-1"),
-  value("display_name", "Scanner Caja 1"),
+  value("host_id", "puesto-anterior-1"),
+  value("display_name", "Puesto Anterior 1"),
   value("serial_port", "COM6"),
   value("base_url", "https://devapp.example.test/"),
 ];
@@ -331,7 +331,7 @@ test("host_id, display_name and serial_port migration is a warning only with hos
   assert.equal(declared.verdict, "PASS", JSON.stringify(declared.blockers));
   assert.deepEqual(declared.warnings.filter((w) => w.code === "VALUE_MIGRATION").map((w) => w.detail.split(":")[0]).sort(), ["display_name", "host_id", "serial_port"]);
   const hostWarning = declared.warnings.find((w) => w.detail.startsWith("host_id:"));
-  assert.ok(hostWarning.detail.includes("sucursal-1-caja-1") && hostWarning.detail.includes("pc-caja-7"), "old -> new must be visible");
+  assert.ok(hostWarning.detail.includes("puesto-anterior-1") && hostWarning.detail.includes("pc-caja-7"), "old -> new must be visible");
   assert.ok(declared.warnings.find((w) => w.detail.startsWith("serial_port:")).detail.includes("(automatic)"));
 });
 
@@ -362,7 +362,7 @@ test("the migration declaration covers only the three keys, not other stored val
 test("old task arguments and machine variables for the migrated keys warn when declared, block when not", () => {
   const f = facts({
     roots: [targetRoot(oldInstall())],
-    tasks: [{ name: "SessionHubScannerBridge", root_hint: TARGET, action_arguments_redacted: '-Mode run -Root "' + TARGET + '" -HostId "sucursal-1-caja-1" -SerialPort "COM6"' }],
+    tasks: [{ name: "SessionHubScannerBridge", root_hint: TARGET, action_arguments_redacted: '-Mode run -Root "' + TARGET + '" -HostId "puesto-anterior-1" -SerialPort "COM6"' }],
     env: [{ scope: "Machine", name: "SESSION_HUB_SCANNER_SERIAL_PORT", kind: "value", present: true, value: "COM6" }],
   });
   const declared = diag.evaluate(f, { context: "install", planned: hostnamePlan() });

@@ -356,12 +356,9 @@ test("PowerShell updater statement and policy stay in sync with the signer", () 
   const updaterProtected = Array.from(
     ps.match(/\$ProtectedNames = @\(([^)]*)\)/)[1].matchAll(/'([^']+)'/g),
   ).map((match) => match[1]);
-  // build-session-hub-scanner-package.ps1 builds from a clean Source tree where
-  // these run-time files never exist; only the updater needs to name them.
-  const runtimeOnly = ["installation-id.json", "reader-identity.json", "ui"];
-  assert.deepEqual([...buildProtected].sort(), updaterProtected.filter((name) => !runtimeOnly.includes(name)).sort());
-  for (const name of runtimeOnly) assert.ok(updaterProtected.includes(name), name + " is not protected from the updater");
-  assert.equal(buildProtected.some((name) => runtimeOnly.includes(name)), false);
+  // Strict parity: whatever the updater protects, the package builder refuses to ship.
+  assert.deepEqual([...buildProtected].sort(), [...updaterProtected].sort());
+  for (const name of ["installation-id.json", "reader-identity.json", "ui"]) assert.ok(buildProtected.includes(name), name + " is not refused by the package builder");
 });
 
 test("installer preserves stored readers, secret and manifest URL on reinstall", () => {

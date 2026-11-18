@@ -25,7 +25,7 @@ const fn = (text, name) => {
 // by the manual run on the PC.
 
 test("installer, launcher, runner, tray, bridge and README contain no COM6, sucursal-1-caja-1, Caja 1 or DEV address default", () => {
-  const forbidden = [/sucursal-1-caja-1/, /Scanner Caja 1/, /'COM6'|"COM6"|COM6/, /devapp\.dimensioncomercial/, /dimensioncomercial\.com\.ar/];
+  const forbidden = [/sucursal-1-caja/, /Scanner Caja/, /'COM6'|"COM6"|COM6/, /devapp\.dimensioncomercial/, /dimensioncomercial\.com\.ar/];
   for (const [name, text] of Object.entries({ installer, launcher, runner, tray, bridge: bridgeText, readme }))
     for (const pattern of forbidden) assert.equal(pattern.test(text), false, name + " still has " + pattern);
   for (const decl of [/\[string\]\$BaseUrl = ''/, /\[string\]\$SerialPort = ''/, /\[string\]\$DisplayName = ''/])
@@ -61,6 +61,41 @@ test("install without parameters derives the station from the hostname, writes n
   assert.match(result.stderr, /Falta --base-url/);
 });
 
+test("the .exe launcher reuses the explicitly saved server address in a reinstall, never a default, and errors clearly with none", () => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "launcher-"));
+  try {
+    // no address given, none saved: clear error
+    const none = spawnSync(process.execPath, [path.join(root, "installer-launcher.js"), "--install-root", dir], { cwd: root, encoding: "utf8" });
+    assert.equal(none.status, 1);
+    assert.match(none.stderr, /Falta --base-url/);
+    // a saved address (and nothing else is read) lets it proceed to the installer: there is no
+    // PowerShell here, so the launch itself fails, but not with the missing-address error
+    fs.writeFileSync(path.join(dir, "scanner-bridge-config.json"), JSON.stringify({ base_url: "https://servidor.example.test", shared_secret: "no-leer" }));
+    const saved = spawnSync(process.execPath, [path.join(root, "installer-launcher.js"), "--install-root", dir], { cwd: root, encoding: "utf8" });
+    assert.doesNotMatch(saved.stderr, /Falta --base-url/);
+    assert.equal(saved.stdout.includes("no-leer") || saved.stderr.includes("no-leer"), false);
+    // an invalid saved value is not an address
+    fs.writeFileSync(path.join(dir, "scanner-bridge-config.json"), JSON.stringify({ base_url: "no-es-url" }));
+    const bad = spawnSync(process.execPath, [path.join(root, "installer-launcher.js"), "--install-root", dir], { cwd: root, encoding: "utf8" });
+    assert.match(bad.stderr, /Falta --base-url/);
+  } finally {
+    fs.unlinkSync(path.join(dir, "scanner-bridge-config.json"));
+    fs.rmdirSync(dir);
+  }
+});
+
+test("no file of the package teaches a shared default (build scripts included)", () => {
+  // wait-and-run-serial-bridge.ps1 is an orphan development script (no package, installer or script
+  // references it) that still carries the old defaults; it is outside this lane's write set and is
+  // reported to the integrator instead of being edited here.
+  const orphans = ["wait-and-run-serial-bridge.ps1"];
+  const files = fs.readdirSync(root).filter((name) => (/\.(ps1|js|md)$/.test(name) || name === "package.json") && !orphans.includes(name));
+  assert.ok(files.includes("build-session-hub-scanner-installer-exe.ps1"));
+  for (const name of files)
+    for (const pattern of [/sucursal-1-caja/, /Scanner Caja/, /--serial-port COM\d/, /devapp\./, /dimensioncomercial/])
+      assert.equal(pattern.test(read(name)), false, name + " still has " + pattern);
+});
+
 test("reinstall takes the hostname for host_id and display_name; a stored host_id is never reused", () => {
   const merge = fn(installer, "Merge-PreservedConfig");
   const map = merge.slice(merge.indexOf("$map = [ordered]@{"), merge.indexOf("}", merge.indexOf("$map = [ordered]@{")));
@@ -90,7 +125,7 @@ test("reinstall without a usable hostname and without KeepHostId fails closed", 
   const resolve = fn(installer, "Resolve-StationIdentity");
   assert.match(resolve, /IsNullOrWhiteSpace\(\$derived\)\) \{\s*throw/);
   assert.match(resolve, /-KeepHostId/);
-  assert.equal(/HostId = 'sucursal|HostId = "/.test(resolve), false);
+  assert.equal(/HostId = .sucursal|HostId = "/.test(resolve), false);
 });
 
 test("runner does not bake HostId or SerialPort into the task arguments unless declared", () => {
