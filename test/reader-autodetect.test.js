@@ -471,3 +471,33 @@ test("an icon request can never change the station name or anything but the read
     await run.stop();
   }
 });
+
+test("host_id lock for all four request kinds: select, forget, unknown action and malformed, in memory and on disk", async () => {
+  const run = await start({ ports: [usb("COM3", { serialNumber: "SN-A" }), usb("COM4", { serialNumber: "SN-B" })] });
+  const file = path.join(run.uiDir, "reader-choice.request.json");
+  const base = { schema: "session-hub-scanner-reader-choice/v1", host_id: "otro-puesto", display_name: "Otro", device: { vendor_id: "0c2e", product_id: "0b61", serial_number: "SN-B", host_id: "otro-puesto" } };
+  const requests = {
+    select: { ...base, action: "select", nonce: "k1" },
+    forget: { ...base, action: "forget", nonce: "k2" },
+    unknown: { ...base, action: "rename_station", nonce: "k3" },
+    malformed: { host_id: "otro-puesto", nonce: "k4", action: 42, schema: "otra-cosa" },
+  };
+  try {
+    await eventually(() => run.readerState() === "ambiguous", "not ambiguous");
+    for (const [kind, request] of Object.entries(requests)) {
+      const before = run.messages.filter((entry) => entry.message.type === "scanner.heartbeat").length;
+      fs.writeFileSync(file, JSON.stringify(request));
+      await eventually(() => !fs.existsSync(file), kind + " request was not consumed");
+      await eventually(() => run.messages.filter((entry) => entry.message.type === "scanner.heartbeat").length > before + 1, "no heartbeat after " + kind);
+      await sleep(1200); // the state file is rewritten every second
+      assert.equal(run.state().host_id, "test-host", kind + ": host_id changed on disk");
+      assert.equal(run.state().display_name === "Otro", false, kind);
+      const beats = run.messages.filter((entry) => entry.message.type === "scanner.heartbeat");
+      assert.ok(beats.every((entry) => entry.message.payload.host_id === "test-host"), kind + ": a heartbeat carries another host_id");
+    }
+    assert.equal(JSON.stringify(run.state()).includes("otro-puesto"), false);
+    assert.equal(run.messages.some((entry) => JSON.stringify(entry.message).includes("otro-puesto")), false);
+  } finally {
+    await run.stop();
+  }
+});
