@@ -62,6 +62,7 @@ function facts(overrides = {}) {
     ...overrides,
   };
 }
+const SECRETISH = (key) => diag.SECRET_NAME_RE.test(key);
 const codes = (result) => result.blockers.map((item) => item.code).sort();
 
 test("installed config identical to the planned values passes", () => {
@@ -199,12 +200,19 @@ test("parity: collector, evaluator, installer, updater and builds agree", () => 
   const allow = list(ps, "ValueAllowKeys");
   for (const key of allow) assert.equal(diag.SECRET_NAME_RE.test(key), false, key + " is secret-named but allowlisted");
   for (const key of diag.COMPARED_KEYS) assert.ok(allow.includes(key), key + " is compared but never emitted");
-  for (const key of allow) assert.ok(diag.NEW_INSTALLER_KEYS.includes(key), key + " unknown to the evaluator");
+  for (const key of allow) assert.ok(diag.NEW_INSTALLER_KEYS.includes(key) || diag.LEGACY_DROPPABLE_KEYS.includes(key), key + " unknown to the evaluator");
+  // Legacy hybrid keys: emitted (to read their value) but never written by the installer.
+  for (const key of diag.LEGACY_DROPPABLE_KEYS) {
+    assert.ok(allow.includes(key), key + " must be emitted by the collector");
+    assert.equal(diag.NEW_INSTALLER_KEYS.includes(key), false, key + " must not be an installer key");
+    assert.equal(SECRETISH(key), false);
+  }
 
   const writeBlock = installer.slice(installer.indexOf("function Write-BridgeConfig"));
   const written = Array.from(writeBlock.slice(0, writeBlock.indexOf("ConvertTo-Json")).matchAll(/^\s{4}([a-z_]+) = /gm)).map((m) => m[1]);
   const optional = Array.from(installer.match(/foreach \(\$optional in @\(([^)]*)\)\)/)[1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
   assert.deepEqual([...new Set([...written, ...optional])].sort(), [...diag.NEW_INSTALLER_KEYS].sort());
+  for (const key of diag.LEGACY_DROPPABLE_KEYS) assert.equal(written.includes(key) || optional.includes(key), false, "installer must never write " + key);
 
   // Secret-kind entries never carry a value in the collector.
   const keyFacts = ps.slice(ps.indexOf("function Get-KeyFacts"), ps.indexOf("function Get-ReaderFacts"));
@@ -394,4 +402,172 @@ test("a reinstall over a 1.3.0 config keeps passing: its new keys are known to t
   const keys = [value("host_id_source", "hostname"), value("reader_usb_id", ""), value("host_id", "pc-caja-7")];
   const result = diag.evaluate(facts({ roots: [targetRoot(keys)] }), { context: "install", planned: hostnamePlan() });
   assert.equal(result.verdict, "PASS", JSON.stringify(result.blockers));
+});
+
+// ---- Smart installer 1.3.1: NOT_ADMIN, legacy keys, archive classification and plan ----
+
+test("NOT_ADMIN blocks install, only warns in report, is silent in ota and without computer facts", () => {
+  const f = facts({ computer: { is_admin: false }, roots: [targetRoot([])] });
+  const install = diag.evaluate(f, { context: "install", planned: plannedDefaults() });
+  assert.ok(codes(install).includes("NOT_ADMIN"));
+  assert.equal(install.verdict, "BLOCK");
+  const report = diag.evaluate(f, { context: "report" });
+  assert.equal(codes(report).includes("NOT_ADMIN"), false);
+  assert.ok(report.warnings.some((w) => w.code === "NOT_ADMIN"));
+  const ota = diag.evaluate(f, { context: "ota" });
+  assert.equal(codes(ota).includes("NOT_ADMIN"), false);
+  assert.equal(ota.warnings.some((w) => w.code === "NOT_ADMIN"), false);
+  // an admin run and facts without `computer` (older fixtures) are unchanged
+  for (const computer of [{ is_admin: true }, undefined]) {
+    const clean = facts({ computer, roots: [targetRoot([])] });
+    assert.equal(codes(diag.evaluate(clean, { context: "install", planned: plannedDefaults() })).includes("NOT_ADMIN"), false);
+  }
+});
+
+test("routing_mode backend and the keyboard flag are discarded with a warning, not blocked", () => {
+  const keys = [value("routing_mode", "backend"), value("local_keyboard_append_enter", "true")];
+  const result = diag.evaluate(facts({ roots: [targetRoot(keys)] }), { context: "install", planned: plannedDefaults() });
+  assert.equal(result.verdict, "PASS", JSON.stringify(result.blockers));
+  assert.equal(result.warnings.filter((w) => w.code === "LEGACY_KEY_DISCARDED").length, 2);
+  // an empty mode is the same as backend
+  const empty = diag.evaluate(facts({ roots: [targetRoot([value("routing_mode", "")])] }), { context: "install", planned: plannedDefaults() });
+  assert.equal(empty.verdict, "PASS");
+});
+
+test("any other routing mode blocks as LEGACY_MODE_NOT_SUPPORTED and acknowledge-drop does not lift it", () => {
+  for (const mode of ["local_keyboard", "hybrid"]) {
+    const keys = [value("routing_mode", mode), value("local_keyboard_append_enter", "true")];
+    const f = facts({ roots: [targetRoot(keys)] });
+    for (const acknowledgeDrop of [[], ["routing_mode", "local_keyboard_append_enter"]]) {
+      const result = diag.evaluate(f, { context: "install", planned: plannedDefaults(), acknowledgeDrop });
+      assert.equal(result.verdict, "BLOCK");
+      assert.ok(codes(result).includes("LEGACY_MODE_NOT_SUPPORTED"), mode);
+      assert.equal(codes(result).includes("CONFIG_KEY_NOT_PRESERVED"), false);
+    }
+  }
+  // the same key in a root that is NOT the target blocks too
+  const caja2 = { ...targetRoot([value("routing_mode", "hybrid")]), path: TARGET + "_Caja2", sources: ["known-instance-root"] };
+  const result = diag.evaluate(facts({ roots: [targetRoot([]), caja2] }), { context: "install", planned: plannedDefaults() });
+  assert.ok(codes(result).includes("LEGACY_MODE_NOT_SUPPORTED"));
+});
+
+test("a redacted legacy value (older collector) keeps CONFIG_KEY_NOT_PRESERVED", () => {
+  const keys = [{ name: "routing_mode", kind: "redacted", present: true, value_type: "String", length: 7 }];
+  const result = diag.evaluate(facts({ roots: [targetRoot(keys)] }), { context: "install", planned: plannedDefaults() });
+  assert.ok(result.blockers.some((b) => b.code === "CONFIG_KEY_NOT_PRESERVED" && b.detail === "routing_mode"));
+});
+
+test("archive classification: what the migrator may archive and what must stop it", () => {
+  for (const code of ["UNKNOWN_BRIDGE_SOURCE", "OTHER_INSTALLATION_FOUND", "FOREIGN_TASK"]) assert.ok(diag.ARCHIVABLE_CODES.includes(code), code);
+  for (const code of ["REDACTION_VIOLATION", "OTA_IN_PROGRESS", "CONFIG_UNREADABLE", "READERS_UNREADABLE", "LEGACY_MODE_NOT_SUPPORTED", "NOT_ADMIN", "FACTS_SCHEMA_INVALID"]) {
+    assert.equal(diag.ARCHIVABLE_CODES.includes(code), false, code);
+    assert.ok(diag.NON_ARCHIVABLE_CODES.includes(code), code);
+  }
+  assert.deepEqual(diag.ARCHIVABLE_CODES.filter((c) => diag.NON_ARCHIVABLE_CODES.includes(c)), []);
+  const split = diag.classifyBlockers([
+    { code: "CONFIG_KEY_NOT_PRESERVED", detail: "routing_mode" },
+    { code: "CONFIG_KEY_NOT_PRESERVED", detail: "some_other_key" },
+    { code: "SOMETHING_NEW", detail: "x" },
+    { code: "UNKNOWN_BRIDGE_SOURCE", detail: "x" },
+  ]);
+  assert.deepEqual(split.archivable.map((b) => b.detail), ["routing_mode", "x"]);
+  assert.deepEqual(split.other.map((b) => b.detail), ["some_other_key", "x"]);
+});
+
+function realCaseFacts(overrides = {}) {
+  const unknown = (suffix, hostId) => {
+    const root = targetRoot([value("version", "1.1.0"), value("host_id", hostId), value("base_url", "https://servidor.example"), value("routing_mode", "backend"), value("local_keyboard_append_enter", "true"), value("install_updater", "true")]);
+    root.files[0].sha256 = "594ccd9b55cfb8dbb82f06c1d109d74fcd0b12415fb26da536ba0da786058445";
+    root.path = TARGET + suffix;
+    root.sources = suffix ? ["known-instance-root"] : ["target", "task:SessionHubScannerBridge"];
+    root.versions = { "installed-version.txt": "1.1.0" };
+    return root;
+  };
+  return facts({
+    computer: { is_admin: true },
+    roots: [unknown("", "caja-ejemplo-1"), unknown("_Caja2", "caja-ejemplo-2"), unknown("_Caja3", "ecrespo-pc")],
+    tasks: ["SessionHubScannerBridge", "SessionHubScannerBridgeTray", "SessionHubScannerBridgeUpdater"].map((name) => ({ name, path: "\\", state: "Ready", root_hint: TARGET })),
+    processes: [{ pid: 1234, root_hint: TARGET }],
+    ...overrides,
+  });
+}
+
+test("real case: after this version only archivable blockers remain and the plan archives every old folder", () => {
+  const f = realCaseFacts();
+  const result = diag.evaluate(f, { context: "install", planned: plannedDefaults({ host_id: "ecrespo-pc" }) });
+  assert.equal(codes(result).filter((c) => c === "UNKNOWN_BRIDGE_SOURCE").length, 3);
+  assert.equal(codes(result).includes("CONFIG_KEY_NOT_PRESERVED"), false);
+  assert.equal(diag.classifyBlockers(result.blockers).other.length, 0, JSON.stringify(diag.classifyBlockers(result.blockers).other));
+
+  const plan = diag.buildMigrationPlan(f, { stationId: "ecrespo-pc" });
+  assert.equal(plan.schema, diag.MIGRATION_PLAN_SCHEMA);
+  assert.equal(plan.can_proceed, true, JSON.stringify(plan));
+  assert.equal(plan.roots.length, 3);
+  assert.equal(plan.target_archived, true);
+  assert.equal(plan.tasks.length, 3);
+  assert.equal(plan.processes.length, 1);
+  assert.deepEqual(plan.foreign_host_ids.sort(), ["caja-ejemplo-1", "caja-ejemplo-2"]);
+  assert.deepEqual(plan.roots.filter((r) => r.other_station).map((r) => r.host_id).sort(), ["caja-ejemplo-1", "caja-ejemplo-2"]);
+  assert.deepEqual(plan.base_urls, ["https://servidor.example"]);
+  // tasks of the folder that belongs to another station are marked so the rollback keeps them disabled
+  assert.ok(plan.tasks.every((t) => t.other_station === true));
+  // the plan is pure: facts are not changed and no secret-like value can appear
+  assert.equal(/secret/i.test(JSON.stringify(plan)), false);
+});
+
+test("migration plan never guesses: unattributable process, masked path, non-archivable blocker", () => {
+  const unattributed = diag.buildMigrationPlan(realCaseFacts({ processes: [{ pid: 7 }] }), { stationId: "ecrespo-pc" });
+  assert.equal(unattributed.can_proceed, false);
+  assert.deepEqual(unattributed.unattributed, [{ kind: "process", pid: 7 }]);
+  const task = diag.buildMigrationPlan(realCaseFacts({ tasks: [{ name: "OtraCosaConBridge", root_hint: "" }] }), { stationId: "x" });
+  assert.equal(task.can_proceed, false);
+  const byName = diag.buildMigrationPlan(realCaseFacts({ tasks: [{ name: "SessionHubScannerBridge", root_hint: "" }] }), { stationId: "x" });
+  assert.equal(byName.can_proceed, true);
+  assert.equal(byName.tasks[0].reason, "name");
+
+  const f = realCaseFacts();
+  f.roots[1].path = "C:\\Users\\<user>\\AppData\\SessionHubScannerBridge_Caja2";
+  assert.deepEqual(diag.buildMigrationPlan(f, { stationId: "x" }).refusals.map((r) => r.code), ["ROOT_PATH_MASKED"]);
+
+  const mode = realCaseFacts();
+  mode.roots[2].config.keys = [value("routing_mode", "local_keyboard")];
+  const refused = diag.buildMigrationPlan(mode, { stationId: "x" });
+  assert.equal(refused.can_proceed, false);
+  assert.ok(refused.blockers_other.some((b) => b.code === "LEGACY_MODE_NOT_SUPPORTED"));
+
+  const ota = realCaseFacts();
+  ota.roots[0].ota = { journal_present: true, journal_phase: "activate" };
+  assert.equal(diag.buildMigrationPlan(ota, { stationId: "x" }).can_proceed, false);
+});
+
+test("a versioned Source in the target is an ordinary reinstall: nothing to archive there", () => {
+  const f = facts({ roots: [targetRoot([value("host_id", "otro")])], tasks: [{ name: "SessionHubScannerBridge", root_hint: TARGET, state: "Ready" }], processes: [{ pid: 5, root_hint: TARGET }] });
+  const plan = diag.buildMigrationPlan(f, { stationId: "ecrespo-pc" });
+  assert.deepEqual([plan.roots.length, plan.tasks.length, plan.processes.length, plan.can_proceed], [0, 0, 0, true]);
+  const other = diag.buildMigrationPlan(facts({ roots: [targetRoot([]), { ...targetRoot([]), path: LEGACY, sources: ["legacy-default"] }] }), { stationId: "x" });
+  assert.deepEqual(other.roots.map((r) => r.path), [LEGACY]);
+  assert.equal(other.target_archived, false);
+});
+
+test("--migration-plan CLI prints the plan JSON and exits 0", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scanner-plan-cli-"));
+  try {
+    const file = path.join(dir, "facts.json");
+    fs.writeFileSync(file, JSON.stringify(realCaseFacts()));
+    const run = spawnSync(process.execPath, [path.join(root, "diagnose-session-hub-scanner.js"), "--facts", file, "--migration-plan", "ecrespo-pc"], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    const plan = JSON.parse(run.stdout);
+    assert.equal(plan.can_proceed, true);
+    assert.equal(plan.roots.length, 3);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the collector prints the Administrator line and still passes computer facts to the evaluator", () => {
+  const ps = fs.readFileSync(path.join(root, "diagnose-session-hub-scanner.ps1"), "utf8");
+  assert.match(ps, /Administrador: \{0\}/);
+  assert.match(ps, /conteo posiblemente incompleto/);
+  assert.match(ps, /is_admin = \(\[Security\.Principal\.WindowsPrincipal\]/);
+  assert.ok(ps.indexOf("$facts.computer.is_admin") > 0 || ps.includes("$facts.computer"));
 });

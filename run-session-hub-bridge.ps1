@@ -26,7 +26,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$root = (Resolve-Path $Root).Path
+if (-not (Test-Path -LiteralPath $Root)) { throw "No existe la carpeta del agente: $Root. Pase -Root con la carpeta de instalacion (el valor por defecto de este script apunta a otra carpeta)." }
+$root = (Resolve-Path -LiteralPath $Root).Path
 $out = Join-Path $root 'bridge.log'
 $err = Join-Path $root 'bridge.err'
 $bridgeScript = Join-Path $root 'bridge.js'

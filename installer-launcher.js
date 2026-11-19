@@ -133,7 +133,12 @@ function main() {
     `${process.env.ProgramData || ""}\\SessionHubScannerBridge`;
   const baseUrl =
     args["base-url"] || args.baseurl || storedBaseUrl(installRoot) || "";
-  if (!`${baseUrl}`.trim()) {
+  // With --archive-legacy the migrator can take the address from the old
+  // installation (it is not secret); the installer still fails clearly if it
+  // cannot.
+  const archiveLegacy = toBoolean(args["archive-legacy"] || args.archivelegacy, false);
+  const planOnly = toBoolean(args["plan-only"] || args.planonly, false);
+  if (!`${baseUrl}`.trim() && !archiveLegacy && !planOnly) {
     console.error(
       "Falta --base-url (direccion del servidor) y no hay una direccion guardada en una instalacion anterior. No hay direccion por defecto: no se instala.",
     );
@@ -261,6 +266,11 @@ function main() {
   if (startUpdaterTask !== null) {
     addPowerShellBoolArg(installArgs, "StartUpdaterTask", startUpdaterTask);
   }
+
+  // Switches: explicit consent to set aside an unverifiable earlier installation
+  // (nothing is deleted), or a plan-only run that changes nothing.
+  if (archiveLegacy) installArgs.push("-ArchiveLegacy");
+  if (planOnly) installArgs.push("-PlanOnly");
 
   const result = spawnSync(pwsh, installArgs, { stdio: "inherit" });
   if (result.error) {

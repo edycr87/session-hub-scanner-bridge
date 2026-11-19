@@ -53,7 +53,8 @@ try {
     'discover-session-hub-readers.ps1',
     'tray-session-hub-bridge.ps1',
     'diagnose-session-hub-scanner.ps1',
-    'diagnose-session-hub-scanner.js'
+    'diagnose-session-hub-scanner.js',
+    'migrate-legacy-session-hub-scanner.ps1'
   )
 
   foreach ($item in $items) {
