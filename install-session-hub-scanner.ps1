@@ -27,9 +27,32 @@
   [string]$StartTrayTask = 'true',
   [string]$InstallUpdater = 'true',
   [string]$StartUpdaterTask = 'true',
-  [string]$AcknowledgeDiagnosticDrop = ''
+  [string]$AcknowledgeDiagnosticDrop = '',
+  # Consent to set aside (rename, never delete) an earlier installation that
+  # this package cannot verify. See migrate-legacy-session-hub-scanner.ps1.
+  [switch]$ArchiveLegacy,
+  # Print what -ArchiveLegacy would do and stop. Changes nothing.
+  [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
+
+# The installer stops and replaces scheduled tasks and processes; without
+# Administrator those steps fail silently and files would be copied over a live
+# agent. It stops first, before reading anything. No automatic relaunch: that
+# would pass -SharedSecret through a new command line.
+function Assert-Administrator {
+  $isAdmin = $false
+  try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch {
+    $isAdmin = $false
+  }
+  if (-not $isAdmin) {
+    Write-Host 'NOT_ADMIN: Este instalador necesita permisos de Administrador. Cerra esta ventana, abri PowerShell con "Ejecutar como administrador" y repeti el mismo comando. No se toco nada.'
+    exit 3
+  }
+}
+Assert-Administrator
 
 function Normalize-ArgKey {
   param(
@@ -580,6 +603,41 @@ if (-not (Test-Path $runner)) {
   throw "No se encuentra run-session-hub-bridge.ps1 en $PSScriptRoot"
 }
 
+# Optional assisted migration (explicit consent only): an earlier installation
+# that this package cannot verify is set aside by the migrator (tasks exported
+# and disabled, its own processes stopped by path, folders renamed with a date,
+# receipt written) BEFORE the preflight and BEFORE Merge-PreservedConfig reads
+# the target folder. Without -ArchiveLegacy/-PlanOnly nothing changes: the
+# preflight below blocks and touches nothing, as before.
+if ($ArchiveLegacy -or $PlanOnly) {
+  $migrator = Join-Path $PSScriptRoot 'migrate-legacy-session-hub-scanner.ps1'
+  if (-not (Test-Path -LiteralPath $migrator)) {
+    throw 'Falta migrate-legacy-session-hub-scanner.ps1 en el paquete; no se migra (falla cerrado).'
+  }
+  $explicitName = if (-not [string]::IsNullOrWhiteSpace($config.KeepHostId)) { $config.KeepHostId } else { [string]$config.HostId }
+  $migrationArgs = @{
+    InstallRoot = $config.InstallRoot
+    StationId = (ConvertTo-StationId -Name (Get-StationName))
+    BaseUrl = [string]$config.BaseUrl
+    KeepHostId = [string]$explicitName
+  }
+  if ($PlanOnly) { $migrationArgs.PlanOnly = $true }
+  elseif ($ArchiveLegacy) { $migrationArgs.ArchiveLegacy = $true }
+  $migration = & $migrator @migrationArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "La migracion no se completo (codigo $LASTEXITCODE). Nada mas se instala. Revise el mensaje de arriba."
+  }
+  if ($PlanOnly) {
+    Write-Host 'Solo se mostro el plan (-PlanOnly). No se instalo ni se cambio nada.'
+    exit 0
+  }
+  $proposedBaseUrl = if ($migration) { [string]@($migration)[-1].BaseUrl } else { '' }
+  if ([string]::IsNullOrWhiteSpace($config.BaseUrl) -and -not [string]::IsNullOrWhiteSpace($proposedBaseUrl)) {
+    $config.BaseUrl = $proposedBaseUrl
+    Write-Host "Direccion del servidor tomada de la instalacion anterior (no es secreta): $proposedBaseUrl"
+  }
+}
+
 # Read-only preflight BEFORE stopping or touching anything: what is installed
 # today (version, hashes, readers, manifest URL, tasks) is compared with what
 # this installer is about to write. Anything it would not keep fails closed.
@@ -589,21 +647,28 @@ Assert-ServerAddress -Cfg $config
 Write-Host "Puesto: $($config.HostId) (origen: $($config.HostIdSource)) | Nombre visible: $($config.DisplayName)"
 Invoke-InstallPreflight -Cfg $config
 
-try {
-  Invoke-Runner -Mode 'stop-tray-task' -RunnerPath $runner -Cfg @{
-    TrayTaskName = $config.TrayTaskName
+# The runner resolves -Root first and fails if the folder does not exist (a
+# clean install, or a folder just set aside). Without a folder there is nothing
+# of ours to stop here. -Root is always passed: the runner's own default points
+# to another folder.
+if (Test-Path -LiteralPath $config.InstallRoot) {
+  try {
+    Invoke-Runner -Mode 'stop-tray-task' -RunnerPath $runner -Cfg @{
+      TrayTaskName = $config.TrayTaskName
+      Root = $config.InstallRoot
+    }
+  } catch {
+    # ignore if tray task not found
   }
-} catch {
-  # ignore if tray task not found
-}
 
-try {
-  Invoke-Runner -Mode 'stop-task' -RunnerPath $runner -Cfg @{
-    TaskName = $config.TaskName
-    Root = $config.InstallRoot
+  try {
+    Invoke-Runner -Mode 'stop-task' -RunnerPath $runner -Cfg @{
+      TaskName = $config.TaskName
+      Root = $config.InstallRoot
+    }
+  } catch {
+    # ignore if task not found or task stop fails
   }
-} catch {
-  # ignore if task not found or task stop fails
 }
 
 try {
