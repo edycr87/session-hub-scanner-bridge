@@ -26,7 +26,10 @@ $ValueAllowKeys = @(
   'install_root', 'input_mode', 'heartbeat_ms', 'serial_baud_rate', 'serial_wait_ms',
   'task_name', 'tray_task_name', 'updater_task_name', 'update_manifest_url',
   'update_channel', 'update_interval_minutes', 'install_tray', 'install_updater',
-  'update_window', 'update_quiet_seconds'
+  'update_window', 'update_quiet_seconds',
+  # Hybrid-branch keys 1.3.x does not use: their value is needed to tell the
+  # discardable `backend` mode from a mode that would lose a function.
+  'routing_mode', 'local_keyboard_append_enter'
 )
 $ReaderAllowKeys = @('reader_id', 'readerId', 'serial_port', 'serialPort', 'scanner_device_id', 'scannerDeviceId', 'device_id', 'serial_baud_rate', 'serialBaudRate', 'serial_wait_ms', 'serialWaitMs')
 $EnvValueAllow = @(
@@ -396,7 +399,10 @@ foreach ($root in $roots) {
   $version = if ($root.versions) { (@($root.versions.Values) -join ' / ') } else { '-' }
   Write-Host ("Instalacion: {0} existe={1} version={2}" -f $root.path, $root.exists, $version)
 }
-Write-Host ("Tareas programadas: {0} | Procesos bridge: {1} | Puertos COM: {2}" -f @($tasks).Count, @($processes).Count, (@($ports | ForEach-Object { $_.device_id }) -join ','))
+$isAdmin = [bool]$facts.computer.is_admin
+$incomplete = if ($isAdmin) { '' } else { ' (conteo posiblemente incompleto)' }
+Write-Host ("Administrador: {0}" -f $(if ($isAdmin) { 'SI' } else { 'NO' }))
+Write-Host ("Tareas programadas: {0} | Procesos bridge: {1}{2} | Puertos COM: {3}" -f @($tasks).Count, @($processes).Count, $incomplete, (@($ports | ForEach-Object { $_.device_id }) -join ','))
 if ($evaluation) {
   Write-Host ("Resultado: {0}" -f $evaluation.verdict)
   foreach ($item in @($evaluation.blockers)) { if ($item) { Write-Host ("  BLOQUEA: {0} {1}" -f $item.code, $item.detail) } }

@@ -8,6 +8,8 @@
 //   node diagnose-session-hub-scanner.js --facts <facts.json>
 //        [--planned <planned.json>] [--context report|install|ota]
 //        [--acknowledge-drop key1,key2]
+//   node diagnose-session-hub-scanner.js --facts <facts.json> --migration-plan <station-id>
+//        (prints the pure archive plan used by migrate-legacy-session-hub-scanner.ps1)
 // exit 0 = PASS (or report), 2 = BLOCK, 1 = usage/parse error.
 const fs = require("fs");
 
@@ -56,6 +58,33 @@ const NEW_INSTALLER_KEYS = [
 // example base_url) keeps blocking, and an installed bridge.js that matches no
 // versioned Source keeps blocking (UNKNOWN_BRIDGE_SOURCE) whatever is declared.
 const MIGRATABLE_KEYS = ["host_id", "display_name", "serial_port"];
+// Keys of the hybrid branch that 1.3.x does not use. The installer never writes
+// them (they are NOT in NEW_INSTALLER_KEYS: the parity test forbids it). With
+// the value `backend` (or empty) they are discarded with a warning; any other
+// routing mode would lose a function, so it blocks (LEGACY_MODE_NOT_SUPPORTED).
+const LEGACY_DROPPABLE_KEYS = ["routing_mode", "local_keyboard_append_enter"];
+// What migrate-legacy-session-hub-scanner.ps1 may set aside (rename, never
+// delete) and what must stop everything untouched. Anything not listed in
+// either set is treated as NOT archivable (fail closed).
+const ARCHIVABLE_CODES = [
+  "UNKNOWN_BRIDGE_SOURCE",
+  "OTHER_INSTALLATION_FOUND",
+  "FOREIGN_TASK",
+  "TASK_ROOT_UNKNOWN",
+  "FOREIGN_BRIDGE_PROCESS",
+  "BRIDGE_PROCESS_ROOT_UNKNOWN",
+  "CONFIG_KEY_NOT_PRESERVED", // only for LEGACY_DROPPABLE_KEYS, see classifyBlockers
+  "VALUE_WOULD_CHANGE",
+];
+const NON_ARCHIVABLE_CODES = [
+  "REDACTION_VIOLATION",
+  "CONFIG_UNREADABLE",
+  "READERS_UNREADABLE",
+  "OTA_IN_PROGRESS",
+  "FACTS_SCHEMA_INVALID",
+  "NOT_ADMIN",
+  "LEGACY_MODE_NOT_SUPPORTED",
+];
 // Values a reinstall would overwrite with the planned (explicit or default)
 // value. A stored value that differs blocks the install.
 const COMPARED_KEYS = [
@@ -209,6 +238,55 @@ function configEntries(root) {
   return map;
 }
 
+// Reviews routing_mode / local_keyboard_append_enter of one root. Returns the
+// keys it fully decided (`handled`), warnings for the discardable ones and
+// blockers for a mode 1.3.x does not have. Acknowledge-drop never lifts a block.
+function reviewLegacyKeys(root) {
+  const out = { handled: new Set(), warnings: [], blockers: [] };
+  if (!root || !root.config || !root.config.present) return out;
+  const entries = configEntries(root);
+  const mode = entries.routing_mode;
+  const append = entries.local_keyboard_append_enter;
+  const label = String(root.path || "");
+  let modeUnsupported = false;
+  let modeUnknown = false;
+  if (mode) {
+    if (mode.kind === "value") {
+      const text = normValue(mode.value).toLowerCase();
+      out.handled.add("routing_mode");
+      if (text === "" || text === "backend")
+        out.warnings.push({ code: "LEGACY_KEY_DISCARDED", detail: label + ": routing_mode (mode backend; archived with the old folder)" });
+      else {
+        modeUnsupported = true;
+        out.blockers.push({
+          code: "LEGACY_MODE_NOT_SUPPORTED",
+          detail: label + ": routing_mode '" + text + "' does not exist in 1.3.x; migrating would lose the keyboard function",
+        });
+      }
+    } else modeUnknown = true;
+  }
+  if (append && append.kind === "value" && !modeUnknown) {
+    out.handled.add("local_keyboard_append_enter");
+    if (!modeUnsupported)
+      out.warnings.push({ code: "LEGACY_KEY_DISCARDED", detail: label + ": local_keyboard_append_enter (archived with the old folder)" });
+  }
+  return out;
+}
+
+// Splits blockers into what the migrator may archive and what must stop it.
+// CONFIG_KEY_NOT_PRESERVED is archivable only for the legacy hybrid keys.
+function classifyBlockers(blockers) {
+  const archivable = [];
+  const other = [];
+  for (const item of blockers || []) {
+    const ok =
+      ARCHIVABLE_CODES.includes(item.code) &&
+      (item.code !== "CONFIG_KEY_NOT_PRESERVED" || LEGACY_DROPPABLE_KEYS.includes(String(item.detail)));
+    (ok ? archivable : other).push(item);
+  }
+  return { archivable, other };
+}
+
 function evaluate(facts, options = {}) {
   const context = options.context || "report";
   const acknowledged = new Set(options.acknowledgeDrop || []);
@@ -223,6 +301,15 @@ function evaluate(facts, options = {}) {
   }
   const violations = findRedactionViolations(facts);
   if (violations.length) block("REDACTION_VIOLATION", violations.slice(0, 10).join("; "));
+
+  // Without Administrator Windows hides the command line of other users'/SYSTEM
+  // processes, so the task/process counts may be incomplete. Only an explicit
+  // `false` counts (facts without `computer` keep their old behavior). OTA runs
+  // as SYSTEM and is not judged here.
+  if (facts.computer && facts.computer.is_admin === false) {
+    if (context === "install") block("NOT_ADMIN", "run the installer as Administrator");
+    else if (context === "report") warn("NOT_ADMIN", "task and process counts may be incomplete");
+  }
 
   const target = normPath(facts.target_install_root);
   const roots = facts.roots || [];
@@ -276,9 +363,19 @@ function evaluate(facts, options = {}) {
   const storedSecret = Boolean(stored.shared_secret && stored.shared_secret.present);
 
   if (context !== "ota") {
+    // Legacy hybrid keys: reviewed in EVERY root (an old root's mode matters
+    // even though it is not the target). A redacted value (old collector) is not
+    // reviewable and falls through to CONFIG_KEY_NOT_PRESERVED below.
+    const legacyHandled = new Set();
+    for (const root of roots) {
+      const review = reviewLegacyKeys(root);
+      for (const item of review.warnings) warn(item.code, item.detail);
+      for (const item of review.blockers) block(item.code, item.detail);
+      if (normPath(root.path) === target) for (const key of review.handled) legacyHandled.add(key);
+    }
     // A reinstall only keeps what the new installer writes or carries over.
     for (const name of Object.keys(stored))
-      if (!NEW_INSTALLER_KEYS.includes(name) && !acknowledged.has(name))
+      if (!NEW_INSTALLER_KEYS.includes(name) && !acknowledged.has(name) && !legacyHandled.has(name))
         block("CONFIG_KEY_NOT_PRESERVED", name);
     if (config && config.readers_present && !config.readers_parse_ok) block("READERS_UNREADABLE", "readers_json");
 
@@ -338,6 +435,100 @@ function evaluate(facts, options = {}) {
   return { verdict, context, blockers, warnings, identified };
 }
 
+const MIGRATION_PLAN_SCHEMA = "session-hub-scanner-migration-plan/v1";
+
+// Pure decision of what migrate-legacy-session-hub-scanner.ps1 would set aside,
+// from the same facts the diagnostic collects (no secrets, no machine access).
+// A folder is archived when its bridge.js is not a versioned Source or when it
+// is not the target; a known Source in the target folder is a normal reinstall.
+// Anything that cannot be attributed to a folder by path (a process without a
+// root, a task without a root and without a SessionHubScanner* name) is never
+// guessed: it lands in `unattributed` and the plan cannot proceed.
+function buildMigrationPlan(facts, options = {}) {
+  const stationId = String(options.stationId || "").trim().toLowerCase();
+  // "install" context so an OTA in progress and a non-admin run count as stoppers.
+  const evaluation = evaluate(facts, { context: "install" });
+  const { other } = classifyBlockers(evaluation.blockers);
+  const target = normPath(facts && facts.target_install_root);
+  const plan = {
+    schema: MIGRATION_PLAN_SCHEMA,
+    station_id: stationId,
+    target_install_root: (facts && facts.target_install_root) || "",
+    roots: [],
+    tasks: [],
+    processes: [],
+    unattributed: [],
+    refusals: [],
+    blockers_other: other,
+    warnings: evaluation.warnings,
+    base_urls: [],
+    foreign_host_ids: [],
+    target_archived: false,
+    can_proceed: false,
+  };
+  if (!facts || facts.schema !== FACTS_SCHEMA) return plan;
+
+  const archived = new Set();
+  for (const root of facts.roots || []) {
+    const files = root.files || [];
+    const hasContent = Boolean(root.exists && (files.length || (root.config && root.config.present)));
+    if (!hasContent) continue;
+    const bridge = files.find((file) => String(file.name).toLowerCase() === "bridge.js");
+    const label = bridge ? KNOWN_BRIDGE_SOURCES[bridge.sha256] || KNOWN_BRIDGE_SOURCES[bridge.sha256_lf] || null : null;
+    const isTarget = normPath(root.path) === target;
+    if (label && isTarget) continue; // versioned Source in the target: ordinary reinstall
+    const entries = configEntries(root);
+    const hostEntry = entries.host_id;
+    const hostId = hostEntry && hostEntry.kind === "value" && hostEntry.present ? String(hostEntry.value).trim() : "";
+    const baseEntry = entries.base_url;
+    const baseUrl =
+      baseEntry && baseEntry.kind === "value" && baseEntry.present ? String(baseEntry.value).trim().replace(/\/+$/, "") : "";
+    const otherStation = Boolean(hostId && stationId && hostId.toLowerCase() !== stationId);
+    const item = {
+      path: root.path,
+      is_target: isTarget,
+      source: label,
+      bridge_sha256: bridge ? bridge.sha256 : null,
+      versions: Object.values(root.versions || {}).map(String),
+      host_id: hostId,
+      other_station: otherStation,
+      base_url: baseUrl,
+      sources: root.sources || [],
+    };
+    if (/<user>/i.test(String(root.path))) plan.refusals.push({ code: "ROOT_PATH_MASKED", detail: root.path });
+    archived.add(normPath(root.path));
+    if (isTarget) plan.target_archived = true;
+    plan.roots.push(item);
+    if (otherStation && !plan.foreign_host_ids.includes(hostId)) plan.foreign_host_ids.push(hostId);
+    if (baseUrl && !/<redacted>|\?/.test(baseUrl) && !plan.base_urls.includes(baseUrl)) plan.base_urls.push(baseUrl);
+  }
+
+  const isOld = (hint) => Boolean(hint) && (normPath(hint) !== target || plan.target_archived);
+  const stationOf = (hint) => plan.roots.some((r) => normPath(r.path) === normPath(hint) && r.other_station);
+  for (const task of facts.tasks || []) {
+    if (task.root_hint) {
+      if (isOld(task.root_hint))
+        plan.tasks.push({
+          name: task.name,
+          path: task.path || "\\",
+          state: task.state || "",
+          root_hint: task.root_hint,
+          reason: "root",
+          other_station: stationOf(task.root_hint),
+        });
+    } else if (/^SessionHubScanner/i.test(String(task.name))) {
+      plan.tasks.push({ name: task.name, path: task.path || "\\", state: task.state || "", root_hint: "", reason: "name", other_station: false });
+    } else plan.unattributed.push({ kind: "task", name: task.name });
+  }
+  for (const proc of facts.processes || []) {
+    if (proc.root_hint) {
+      if (isOld(proc.root_hint)) plan.processes.push({ pid: proc.pid, root_hint: proc.root_hint });
+    } else plan.unattributed.push({ kind: "process", pid: proc.pid });
+  }
+  plan.can_proceed = other.length === 0 && plan.unattributed.length === 0 && plan.refusals.length === 0;
+  return plan;
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -359,6 +550,11 @@ function main() {
   if (!args.facts) throw new Error("ARGUMENT_REQUIRED:--facts");
   const context = args.context || "report";
   if (!["report", "install", "ota"].includes(context)) throw new Error("CONTEXT_INVALID");
+  if (args["migration-plan"] !== undefined) {
+    const plan = buildMigrationPlan(readJson(args.facts), { stationId: args["migration-plan"] });
+    process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
+    process.exit(0);
+  }
   const result = evaluate(readJson(args.facts), {
     context,
     planned: args.planned ? readJson(args.planned) : null,
@@ -383,7 +579,13 @@ module.exports = {
   NEW_INSTALLER_KEYS,
   COMPARED_KEYS,
   MIGRATABLE_KEYS,
+  LEGACY_DROPPABLE_KEYS,
+  ARCHIVABLE_CODES,
+  NON_ARCHIVABLE_CODES,
+  MIGRATION_PLAN_SCHEMA,
   KNOWN_BRIDGE_SOURCES,
+  classifyBlockers,
+  buildMigrationPlan,
   evaluate,
   findRedactionViolations,
   parseTaskArgs,
