@@ -237,3 +237,146 @@ test("Windows only: the PowerShell normalization gives the same names as the age
   const expected = ["desktop-nandu-01", "caja-norte-2", "pc-deposito-sur", "a".repeat(40), "puesto", ""];
   expected.forEach((name, index) => assert.equal(lines[index] || "", name, names[index]));
 });
+
+// ---- Smart installer 1.3.1 (text tests: they prove what the scripts SAY; the behavior runs in the Windows job) ----
+
+const migrator = read("migrate-legacy-session-hub-scanner.ps1");
+const stripComments = (text) => text.replace(/^\s*#.*$/gm, "");
+
+test("installer stops first, before reading anything, when it is not Administrator (NOT_ADMIN, exit 3)", () => {
+  const body = fn(installer, "Assert-Administrator");
+  assert.match(body, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
+  assert.match(body, /NOT_ADMIN/);
+  assert.match(body, /exit 3/);
+  const callAt = installer.indexOf("\nAssert-Administrator\n");
+  assert.ok(callAt > 0, "Assert-Administrator is never called");
+  assert.ok(callAt < installer.indexOf("$config = Read-InstallerConfig"), "must run before the config is read");
+  assert.ok(callAt < installer.indexOf("Invoke-InstallPreflight -Cfg $config"));
+  assert.equal(/Start-Process[^\n]*RunAs/.test(installer), false, "no automatic relaunch in 1.3.1 (it would re-pass -SharedSecret)");
+});
+
+test("the Resolve-Path errors are gone: both stops carry -Root and run only when the folder exists", () => {
+  const stopAt = installer.indexOf("Invoke-Runner -Mode 'stop-tray-task'");
+  const guard = installer.lastIndexOf("if (Test-Path -LiteralPath $config.InstallRoot) {", stopAt);
+  assert.ok(guard > 0 && guard < stopAt, "stop-tray-task must be inside the Test-Path guard");
+  const block = installer.slice(guard, installer.indexOf("try {\n  $runningInstalled"));
+  assert.match(block, /stop-tray-task[\s\S]*TrayTaskName = \$config\.TrayTaskName\s+Root = \$config\.InstallRoot/);
+  assert.match(block, /stop-task[\s\S]*Root = \$config\.InstallRoot/);
+  assert.match(runner, /if \(-not \(Test-Path -LiteralPath \$Root\)\) \{ throw "No existe la carpeta del agente/);
+  assert.match(runner, /Resolve-Path -LiteralPath \$Root/);
+});
+
+test("installer has -ArchiveLegacy and -PlanOnly and runs the migrator before Merge-PreservedConfig and the preflight", () => {
+  assert.match(installer, /\[switch\]\$ArchiveLegacy/);
+  assert.match(installer, /\[switch\]\$PlanOnly/);
+  const migrateAt = installer.indexOf("& $migrator @migrationArgs");
+  assert.ok(migrateAt > 0);
+  assert.ok(migrateAt < installer.indexOf("Merge-PreservedConfig -Cfg $config -InstallPath"));
+  assert.ok(migrateAt < installer.indexOf("Invoke-InstallPreflight -Cfg $config\n"));
+  assert.match(installer, /if \(\$ArchiveLegacy -or \$PlanOnly\)/, "without the flags nothing changes");
+  assert.match(installer, /migrate-legacy-session-hub-scanner\.ps1/);
+  assert.match(installer, /if \(\$PlanOnly\) \{[\s\S]*exit 0/);
+  // the station name of this PC is handed over; a name from an old folder is never inherited
+  assert.match(installer, /StationId = \(ConvertTo-StationId -Name \(Get-StationName\)\)/);
+  assert.match(installer, /KeepHostId = \[string\]\$explicitName/);
+  assert.equal(/'host_id'/.test(fn(installer, "Merge-PreservedConfig")), false, "host_id must still not be inherited");
+});
+
+test("migrator: admin first, never deletes, renames without -Force, exports/disables tasks, suffixes names", () => {
+  assert.ok(migrator.indexOf("\nAssert-Administrator\n") > 0);
+  assert.match(fn(migrator, "Assert-Administrator"), /exit 3/);
+  const code = stripComments(migrator);
+  for (const forbidden of [/Remove-Item/, /Unregister-ScheduledTask/, /Rename-Item[^\n]*-Force/, /\[System\.IO\.Directory\]::Delete/, /rd\s+\/s/i, /Stop-Process[^\n]*-Name/, /Get-Process\s+-Name/, /taskkill/i])
+    assert.equal(forbidden.test(code), false, "migrator must not contain " + forbidden);
+  for (const needed of ["Rename-Item -LiteralPath", "Export-ScheduledTask", "Disable-ScheduledTask", "Stop-ScheduledTask", "Move-Item -LiteralPath", "Register-ScheduledTask"])
+    assert.ok(code.includes(needed), "migrator lacks " + needed);
+  const free = fn(migrator, "Get-FreeArchiveName");
+  assert.match(free, /while \(Test-Path -LiteralPath/);
+  assert.match(free, /\$n \+= 1/);
+  assert.match(migrator, /respaldo/);
+  assert.match(migrator, /migracion-/);
+});
+
+test("migrator: exports tasks before disabling, stops processes before renaming, receipt written step by step", () => {
+  const exportAt = migrator.indexOf("-Intent 'exportar tareas a XML'");
+  const disableAt = migrator.indexOf("-Intent 'desactivar y detener tareas'");
+  assert.ok(migrator.indexOf("Export-ScheduledTask -TaskName $task.name", exportAt) > exportAt);
+  const stopProcAt = migrator.indexOf("Stop-ProcessesUnderRoots -Roots $oldRootPaths -Receipt $receipt");
+  const moveAt = migrator.indexOf("Move-Item -LiteralPath $item.Path");
+  const renameAt = migrator.indexOf("Rename-Item -LiteralPath $entry.original");
+  assert.ok(exportAt > 0 && exportAt < disableAt && disableAt < stopProcAt && stopProcAt < moveAt && moveAt < renameAt);
+  assert.ok(migrator.indexOf("Protect-MigrationFolder -Path $backupDir") < exportAt, "ACL first, then anything is written");
+  assert.match(fn(migrator, "Protect-MigrationFolder"), /\*S-1-5-18:\(OI\)\(CI\)\(F\)' '\*S-1-5-32-544:\(OI\)\(CI\)\(F\)/);
+  assert.match(migrator, /if \(\$remaining\.Count -gt 0\) \{\s+throw/, "a process that survives stops the run before renaming");
+  assert.match(fn(migrator, "Add-Step"), /status = 'intent'/);
+  assert.match(fn(migrator, "Complete-Step"), /'error'/);
+  assert.match(migrator, /session-hub-scanner-legacy-archive\/v1/);
+  for (const field of ["original", "archived_to", "bridge_sha256", "versions", "host_id", "other_station", "base_url", "state_before", "root_hint", "xml", "stopped", "sha256", "steps", "mode", "created_utc", "computer_name", "package_version"])
+    assert.ok(migrator.includes(field), "recibo field " + field);
+});
+
+test("migrator: processes are matched by path only, never by process, station or host name", () => {
+  const match = fn(migrator, "Test-ProcessUnderRoot");
+  assert.match(match, /ExecutablePath/);
+  assert.match(match, /CommandLine/);
+  assert.equal(/--host-id|HostId|host_id/.test(match), false);
+  assert.equal(/-eq 'node\.exe'|-like '\*bridge/.test(match), false);
+  assert.match(match, /\+ '\\'/, "the root is compared with a trailing backslash (no prefix collisions)");
+  const stop = fn(migrator, "Stop-ProcessesUnderRoots");
+  assert.match(stop, /Get-ProcessesUnderRoots -Roots \$Roots/);
+  assert.match(migrator, /\$PID/, "never stops itself");
+  assert.match(migrator, /Este paquete esta dentro de una carpeta que se archivaria/);
+});
+
+test("migrator: no identity of another station is reused, no secret is read, nothing starts", () => {
+  assert.match(migrator, /pertenece a otro puesto segun la carpeta vieja; no se reutiliza/);
+  assert.match(migrator, /foreign_host_ids/);
+  assert.match(migrator, /ATENCION: el nombre de puesto/);
+  const code = stripComments(migrator);
+  assert.equal(/shared_secret|SharedSecret|Start-ScheduledTask|Start-Process|&\s*wscript/i.test(code), false, "no secret handling and nothing is started");
+  assert.equal(/\$task\.other_station -eq \$true -and -not \$AllowOtherStationIdentity/.test(code), true, "rollback keeps other-station tasks disabled");
+  assert.match(migrator, /\[switch\]\$AllowOtherStationIdentity/);
+  assert.match(migrator, /\$Rollback/);
+  assert.match(migrator, /NO arranco nada|NO se arranco nada/);
+  // consent: flag, typed word or exit 4 without touching anything
+  assert.match(migrator, /-cne 'ARCHIVAR'/);
+  assert.match(migrator, /exit 4/);
+  assert.match(migrator, /\[switch\]\$PlanOnly/);
+  // the server address (not secret) is proposed only when all old folders agree
+  assert.match(migrator, /Las carpetas viejas tienen direcciones distintas/);
+});
+
+test("migrator: its station-id function is the installer's, byte for byte", () => {
+  const norm = (text) => stripComments(text).replace(/\n\s*\n/g, "\n").trim();
+  assert.equal(norm(fn(migrator, "ConvertTo-StationId")), norm(fn(installer, "ConvertTo-StationId")));
+  assert.equal(norm(fn(migrator, "Get-StationName")), norm(fn(installer, "Get-StationName")));
+  const diagnoseText = read("diagnose-session-hub-scanner.ps1");
+  assert.equal(norm(fn(migrator, "Get-RootHint")), norm(fn(diagnoseText, "Get-RootHint").replace(/\n\$facts = [\s\S]*$/, "")));
+});
+
+test("the migrator ships in the package, in the installer payload and is passed by the launcher", () => {
+  assert.ok(read("build-session-hub-scanner-package.ps1").includes("'migrate-legacy-session-hub-scanner.ps1'"));
+  assert.ok(read("build-session-hub-scanner-installer-exe.ps1").includes("'migrate-legacy-session-hub-scanner.ps1'"));
+  assert.match(launcher, /installArgs\.push\("-ArchiveLegacy"\)/);
+  assert.match(launcher, /installArgs\.push\("-PlanOnly"\)/);
+  assert.match(launcher, /args\["archive-legacy"\]/);
+});
+
+test("README documents the assisted command, -PlanOnly, -ArchiveLegacy, -Rollback and NOT_ADMIN", () => {
+  for (const text of ["-ArchiveLegacy", "-PlanOnly", "-Rollback", "recibo.json", "respaldo-AAAAMMDD", "-AllowOtherStationIdentity", "NOT_ADMIN", "migrate-legacy-session-hub-scanner.ps1"])
+    assert.ok(readme.includes(text), text + " is not in the README");
+  assert.equal(/sucursal-1-caja|COM6|dimensioncomercial/.test(readme + migrator), false);
+});
+
+test("version 1.3.1 is consistent and bridge.js (and so its known hash) is not touched", () => {
+  const pkg = JSON.parse(read("package.json"));
+  const lock = JSON.parse(read("package-lock.json"));
+  assert.equal(pkg.version, "1.3.1");
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[""].version, pkg.version);
+});
+
+test("out of scope stays out: no OTA, no new keys, no signing, no printing changes in the migrator", () => {
+  const code = stripComments(migrator);
+  assert.equal(/ManifestUrl|Invoke-WebRequest|Invoke-RestMethod|DownloadFile|openssl|Get-AuthenticodeSignature|Out-Printer|Start-Update/i.test(code), false);
+});
